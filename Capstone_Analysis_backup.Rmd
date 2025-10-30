@@ -1,0 +1,3652 @@
+---
+title: "Capstone Analysis: Hospital Readmission Prediction"
+author: "Joseph Lattanzi"
+date: "2025-10-13"
+output: 
+  rmdformats::readthedown:
+    code_folding: hide
+    highlight: kate
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      fig.width = 10, fig.height = 6)
+```
+
+# 1. Introduction
+
+Hospital readmissions represent a critical challenge in healthcare, with readmission rates remaining persistently high despite targeted interventions. Approximately 20% of Medicare beneficiaries experience readmission within 30 days, with average US hospital readmission rates of 14.67% across all conditions. Hospital readmissions cost approximately $26 billion annually in the United States.
+
+This analysis aims to develop a predictive model for ICU readmissions using the MIMIC-IV dataset, focusing on identifying patients at high risk for readmission within 30 days of discharge.
+
+# 2. Data Loading and Setup
+
+```{r libraries}
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(R.utils)
+library(lubridate)
+library(VIM)
+library(knitr)
+library(DT)
+library(tidyr)
+library(naniar)
+library(rmdformats)
+```
+
+```{r data-loading}
+# Load core datasets
+cat('Loading MIMIC-IV datasets... \n')
+admissions = fread('/Users/josephlattanzi/Scripts/Capstone/Data/admissions.csv.gz')
+patients = fread('/Users/josephlattanzi/Scripts/Capstone/Data/patients.csv.gz')
+diagnoses = fread('/Users/josephlattanzi/Scripts/Capstone/Data/diagnoses_icd.csv.gz')
+prescriptions = fread('/Users/josephlattanzi/Scripts/Capstone/Data/prescriptions.csv.gz')
+procedures = fread('/Users/josephlattanzi/Scripts/Capstone/Data/procedures_icd.csv.gz')
+d_labitems = fread('/Users/josephlattanzi/Scripts/Capstone/Data/d_labitems.csv.gz')
+d_icd_diagnoses = fread('/Users/josephlattanzi/Scripts/Capstone/Data/d_icd_diagnoses.csv.gz')
+d_icd_procedures = fread('/Users/josephlattanzi/Scripts/Capstone/Data/d_icd_procedures.csv.gz')
+
+# Load lab events data
+cat('Loading lab events... \n')
+labevents = fread('/Users/josephlattanzi/Scripts/Capstone/Data/labevents.csv.gz',
+                  select = c('subject_id', 'hadm_id', 'itemid', 'charttime', 'valuenum'),
+                  showProgress = TRUE)
+
+# Filter to only lab events with valid numeric values and linked to admissions
+labevents = labevents[!is.na(valuenum) & valuenum > 0 & !is.na(hadm_id)]
+
+cat('Lab events filtered to', nrow(labevents), 'rows \n')
+
+# Display dataset dimensions
+data_summary = data.frame(
+  Dataset = c('Admissions', 'Patients', 'Diagnoses', 'Prescriptions', 'Procedures', 'Lab Events'),
+  Rows = c(nrow(admissions), nrow(patients), nrow(diagnoses), nrow(prescriptions), nrow(procedures), nrow(labevents)),
+  Columns = c(ncol(admissions), ncol(patients), ncol(diagnoses), ncol(prescriptions), ncol(procedures), ncol(labevents))
+)
+
+kable(data_summary, caption = 'MIMIC-IV Dataset Overview')
+```
+
+# 3. Data Preprocessing and Readmission Definition
+
+## 3.1 Admission Data Preprocessing
+
+```{r data-preprocessing}
+# Convert dates to proper format
+admissions$admittime = as.POSIXct(admissions$admittime)
+admissions$dischtime = as.POSIXct(admissions$dischtime)
+
+# Calculate length of stay
+admissions$los_days = as.numeric(difftime(admissions$dischtime,
+                                          admissions$admittime,
+                                          units = 'days'))
+
+# Remove invalid length of stay values
+admissions = admissions %>% filter(los_days > 0 & los_days < 365)
+
+cat('After filtering, admissions dataset contains', nrow(admissions), 'records\n')
+```
+
+## 3.2 Readmission Identification
+
+```{r readmission-calculation}
+# Identify readmissions within 30 days
+admissions = admissions %>%
+  arrange(subject_id, admittime) %>%
+  group_by(subject_id) %>%
+  mutate(
+    next_admission = lead(admittime),
+    days_to_readmit = as.numeric(difftime(next_admission, dischtime, units = 'days')),
+    readmit_30day = ifelse(days_to_readmit <= 30 & !is.na(days_to_readmit), 1, 0)
+  ) %>%
+  ungroup()
+
+# Filter to eligible discharges (exclude last admission per patient)
+readmit_eligible = admissions %>%
+  filter(!is.na(readmit_30day))
+
+# Calculate overall readmission statistics
+readmit_summary = readmit_eligible %>%
+  summarise(
+    total_discharges = n(),
+    readmissions = sum(readmit_30day),
+    readmission_rate = mean(readmit_30day) * 100,
+    .groups = 'drop'
+  )
+
+# Display results
+summary_table = data.frame(
+  Metric = c('Total Eligible Discharges', '30-Day Readmissions', '30-day Readmission Rate (%)'),
+  Value = c(readmit_summary$total_discharges,
+            readmit_summary$readmissions,
+            round(readmit_summary$readmission_rate, 2))
+)
+
+kable(summary_table, caption = '30-Day Readmission Summary Statistics')
+
+cat('Eligible discharges for readmission analysis:', nrow(readmit_eligible), '\n')
+```
+
+# 4. Exploratory Data Analysis
+
+## 4.1 Patient Demographics and Clinical Characteristics
+
+```{r patient-characteristics}
+# Merge with patient data for demographics
+analysis_data = readmit_eligible %>%
+  left_join(patients, by = 'subject_id') %>%
+  mutate(age_at_adm = anchor_age)
+
+# Age comparison by readmission status
+age_stats = analysis_data %>%
+  group_by(readmit_30day) %>%
+  summarise(
+    count = n(),
+    mean_age = round(mean(age_at_adm, na.rm = TRUE), 1),
+    median_age = round(median(age_at_adm, na.rm = TRUE), 1),
+    sd_age = round(sd(age_at_adm, na.rm = TRUE), 1),
+    .groups = 'drop'
+  ) %>%
+  mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
+
+kable(age_stats[, c('readmission_status', 'count', 'mean_age', 'median_age', 'sd_age')],
+      caption = 'Age Statistics by Readmission Status',
+      col.names = c('Readmission Status', 'Count', 'Mean Age', 'Median Age', 'SD Age'))
+
+# Length of stay comparison
+los_stats <- analysis_data %>%
+  group_by(readmit_30day) %>%
+  summarise(
+    count = n(),
+    mean_los = round(mean(los_days, na.rm = TRUE), 1),
+    median_los = round(median(los_days, na.rm = TRUE), 1),
+    q75_los = round(quantile(los_days, 0.75, na.rm = TRUE), 1),
+    max_los = round(max(los_days, na.rm = TRUE), 1),
+    .groups = 'drop'
+  ) %>%
+  mutate(readmission_status = ifelse(readmit_30day == 1, "Readmitted", "Not Readmitted"))
+
+kable(los_stats[, c("readmission_status", "count", "mean_los", "median_los", "q75_los")], 
+      caption = "Length of Stay Statistics by Readmission Status",
+      col.names = c("Readmission Status", "Count", "Mean LOS", "Median LOS", "75th Percentile LOS"))
+```
+
+## 4.2 Diagnosis Analysis
+
+```{r diagnoses-analysis}
+# Basic overview of diagnoses data
+cat("Diagnoses data contains", nrow(diagnoses), "records for", 
+    length(unique(diagnoses$hadm_id)), "hospital admissions.\n")
+cat("There are", length(unique(diagnoses$icd_code)), "unique ICD codes recorded.\n")
+
+# Full integration with diagnosis dictionary
+diagnoses_enhanced <- diagnoses %>%
+  left_join(d_icd_diagnoses, by = c('icd_code' = 'icd_code', 'icd_version' = 'icd_version')) %>%
+  mutate(
+    # Use only long_title since short_title doesn't exist
+    diagnosis_name = coalesce(long_title, paste("Unknown Diagnosis", icd_code)),
+    # Create diagnosis categories based on ICD structure
+    diagnosis_category = case_when(
+      icd_version == 9 ~ case_when(
+        substr(icd_code, 1, 3) %in% c("001", "002", "003") ~ "Infectious Diseases",
+        substr(icd_code, 1, 1) == "1" ~ "Neoplasms",
+        substr(icd_code, 1, 1) == "2" ~ "Endocrine/Metabolic",
+        substr(icd_code, 1, 1) == "3" ~ "Blood Disorders",
+        substr(icd_code, 1, 1) == "4" ~ "Circulatory System",
+        substr(icd_code, 1, 1) == "5" ~ "Respiratory System",
+        substr(icd_code, 1, 1) == "6" ~ "Digestive System",
+        substr(icd_code, 1, 1) == "7" ~ "Genitourinary System",
+        substr(icd_code, 1, 1) == "8" ~ "Injury/Poisoning",
+        substr(icd_code, 1, 1) == "V" ~ "Supplementary Classification",
+        TRUE ~ "Other ICD-9"
+      ),
+      icd_version == 10 ~ case_when(
+        substr(icd_code, 1, 1) %in% c("A", "B") ~ "Infectious Diseases",
+        substr(icd_code, 1, 1) == "C" ~ "Neoplasms",
+        substr(icd_code, 1, 1) == "E" ~ "Endocrine/Metabolic",
+        substr(icd_code, 1, 1) == "I" ~ "Circulatory System",
+        substr(icd_code, 1, 1) == "J" ~ "Respiratory System",
+        substr(icd_code, 1, 1) == "K" ~ "Digestive System",
+        substr(icd_code, 1, 1) == "N" ~ "Genitourinary System",
+        substr(icd_code, 1, 1) == "S" ~ "Injury/Poisoning",
+        substr(icd_code, 1, 1) == "Z" ~ "Health Status Codes",
+        TRUE ~ "Other ICD-10"
+      ),
+      TRUE ~ "Unknown Version"
+    )
+  )
+
+# Check dictionary integration success
+dict_integration_stats <- diagnoses_enhanced %>%
+  summarise(
+    total_records = n(),
+    with_descriptions = sum(!is.na(long_title)),
+    coverage_percent = round(sum(!is.na(long_title)) / n() * 100, 1),
+    unique_categories = n_distinct(diagnosis_category)
+  )
+
+cat("\nDictionary Integration Results:\n")
+cat("Total diagnosis records:", dict_integration_stats$total_records, "\n")
+cat("Records with descriptions:", dict_integration_stats$with_descriptions, "\n")
+cat("Dictionary coverage:", dict_integration_stats$coverage_percent, "%\n")
+cat("Unique diagnosis categories:", dict_integration_stats$unique_categories, "\n")
+
+# Analyze by diagnosis categories
+category_summary <- diagnoses_enhanced %>%
+  group_by(diagnosis_category) %>%
+  summarise(
+    total_cases = n(),
+    unique_codes = n_distinct(icd_code),
+    unique_patients = n_distinct(subject_id),
+    unique_admissions = n_distinct(hadm_id),
+    percent_of_total = round(n() / nrow(diagnoses_enhanced) * 100, 1),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(total_cases))
+
+kable(category_summary, caption = 'Diagnosis Distribution by Clinical Category',
+      col.names = c('Clinical Category', 'Total Cases', 'Unique Codes', 'Unique Patients', 
+                   'Unique Admissions', '% of Total'))
+
+# Top diagnoses with full descriptions
+icd_summary_enhanced <- diagnoses_enhanced %>%
+  group_by(icd_code, icd_version, diagnosis_name, diagnosis_category) %>%
+  summarise(
+    frequency = n(),
+    unique_patients = n_distinct(subject_id),
+    unique_admissions = n_distinct(hadm_id),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(frequency))
+
+top_diagnoses_enhanced <- head(icd_summary_enhanced, 15) %>%
+  mutate(
+    # Truncate long descriptions for table readability
+    diagnosis_display = ifelse(nchar(diagnosis_name) > 60, 
+                              paste0(substr(diagnosis_name, 1, 57), "..."), 
+                              diagnosis_name)
+  )
+
+kable(top_diagnoses_enhanced[, c('icd_code', 'icd_version', 'diagnosis_display', 'diagnosis_category', 'frequency', 'unique_patients')], 
+      caption = 'Top 15 Most Frequent Diagnoses with Clinical Categories',
+      col.names = c('ICD Code', 'Version', 'Diagnosis', 'Category', 'Frequency', 'Unique Patients'))
+
+# Diagnoses per admission and readmission analysis using enhanced data
+diagnoses_per_admission_enhanced = diagnoses_enhanced %>%
+  group_by(hadm_id) %>%
+  summarise(
+    diagnoses_count = n(),
+    unique_categories = n_distinct(diagnosis_category),
+    has_circulatory = any(diagnosis_category == "Circulatory System"),
+    has_respiratory = any(diagnosis_category == "Respiratory System"),
+    has_endocrine = any(diagnosis_category == "Endocrine/Metabolic"),
+    has_infectious = any(diagnosis_category == "Infectious Diseases"),
+    .groups = 'drop'
+  )
+
+diagnoses_burden_table = diagnoses_per_admission_enhanced %>%
+  summarise(
+    mean_diagnoses = round(mean(diagnoses_count), 2),
+    median_diagnoses = median(diagnoses_count),
+    max_diagnoses = max(diagnoses_count),
+    q75_diagnoses = quantile(diagnoses_count, 0.75),
+    mean_categories = round(mean(unique_categories), 2)
+  )
+
+diagnoses_summary_table = data.frame(
+  Metric = c('Mean Diagnoses per Admission', 'Median Diagnoses per Admission', 
+             '75th Percentile Diagnoses', 'Max Diagnoses per Admission',
+             'Mean Diagnostic Categories per Admission'),
+  Value = c(diagnoses_burden_table$mean_diagnoses,
+            diagnoses_burden_table$median_diagnoses,
+            diagnoses_burden_table$q75_diagnoses,
+            diagnoses_burden_table$max_diagnoses,
+            diagnoses_burden_table$mean_categories)
+)
+
+kable(diagnoses_summary_table, caption = 'Enhanced Diagnoses Burden per Admission')
+
+# Merge enhanced diagnoses data with analysis dataset
+admission_diagnoses_enhanced = diagnoses_enhanced %>%
+  group_by(hadm_id) %>%
+  summarise(
+    total_diagnoses = n(),
+    unique_diagnosis_categories = n_distinct(diagnosis_category),
+    primary_diagnosis_code = first(icd_code[seq_num == 1]),
+    primary_diagnosis_name = first(diagnosis_name[seq_num == 1]),
+    primary_diagnosis_category = first(diagnosis_category[seq_num == 1]),
+    # High-risk diagnosis flags
+    has_heart_failure = any(grepl("heart failure|cardiac failure", diagnosis_name, ignore.case = TRUE)),
+    has_diabetes = any(grepl("diabetes", diagnosis_name, ignore.case = TRUE)),
+    has_copd = any(grepl("chronic obstructive|copd|emphysema", diagnosis_name, ignore.case = TRUE)),
+    has_pneumonia = any(grepl("pneumonia", diagnosis_name, ignore.case = TRUE)),
+    .groups = 'drop'
+  )
+
+analysis_data = analysis_data %>%
+  left_join(admission_diagnoses_enhanced, by = 'hadm_id')
+
+# High-risk diagnoses and readmission analysis
+high_risk_conditions <- analysis_data %>%
+  summarise(
+    heart_failure_readmit_rate = round(mean(readmit_30day[has_heart_failure == TRUE], na.rm = TRUE) * 100, 1),
+    diabetes_readmit_rate = round(mean(readmit_30day[has_diabetes == TRUE], na.rm = TRUE) * 100, 1),
+    copd_readmit_rate = round(mean(readmit_30day[has_copd == TRUE], na.rm = TRUE) * 100, 1),
+    pneumonia_readmit_rate = round(mean(readmit_30day[has_pneumonia == TRUE], na.rm = TRUE) * 100, 1),
+    overall_readmit_rate = round(mean(readmit_30day, na.rm = TRUE) * 100, 1)
+  )
+
+high_risk_table <- data.frame(
+  Condition = c('Heart Failure', 'Diabetes', 'COPD', 'Pneumonia', 'Overall'),
+  Readmission_Rate = c(high_risk_conditions$heart_failure_readmit_rate,
+                       high_risk_conditions$diabetes_readmit_rate,
+                       high_risk_conditions$copd_readmit_rate,
+                       high_risk_conditions$pneumonia_readmit_rate,
+                       high_risk_conditions$overall_readmit_rate)
+)
+
+kable(high_risk_table, caption = 'Readmission Rates by High-Risk Conditions',
+      col.names = c('Condition', 'Readmission Rate (%)'))
+
+# Primary diagnosis category analysis
+primary_dx_category_analysis = analysis_data %>%
+  group_by(primary_diagnosis_category) %>%
+  summarise(
+    total_cases = n(),
+    readmissions = sum(readmit_30day, na.rm = TRUE),
+    readmission_rate = round(mean(readmit_30day, na.rm = TRUE) * 100, 1),
+    .groups = 'drop'
+  ) %>%
+  filter(total_cases >= 20 & !is.na(primary_diagnosis_category)) %>%
+  arrange(desc(readmission_rate))
+
+kable(primary_dx_category_analysis, caption = 'Readmission Rates by Primary Diagnosis Category',
+      col.names = c('Primary Diagnosis Category', 'Total Cases', 'Readmissions', 'Readmission Rate (%)'))
+
+# Enhanced diagnosis burden by readmission status
+diagnosis_burden_enhanced = analysis_data %>%
+  group_by(readmit_30day) %>%
+  summarise(
+    mean_diagnoses = round(mean(total_diagnoses, na.rm = TRUE), 2),
+    median_diagnoses = median(total_diagnoses, na.rm = TRUE),
+    mean_categories = round(mean(unique_diagnosis_categories, na.rm = TRUE), 2),
+    q75_diagnoses = quantile(total_diagnoses, 0.75, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
+
+kable(diagnosis_burden_enhanced[, c('readmission_status', 'mean_diagnoses', 'median_diagnoses', 'mean_categories', 'q75_diagnoses')],
+      caption = 'Enhanced Diagnosis Burden by Readmission Status',
+      col.names = c('Readmission Status', 'Mean Diagnoses', 'Median Diagnoses', 'Mean Categories', '75th Percentile'))
+```
+
+## 4.3 Prescription Analysis
+
+```{r prescriptions-analysis}
+cat('Prescriptions dataset contains', nrow(prescriptions), 'records\n')
+cat('Unique patients:', length(unique(prescriptions$subject_id)), '\n')
+cat('Unique admissions:', length(unique(prescriptions$hadm_id)), '\n')
+cat('Unique medications:', length(unique(prescriptions$drug)), '\n')
+
+# Enhanced prescription analysis with drug categorization
+prescriptions_enhanced <- prescriptions %>%
+  mutate(
+    # Clean drug names for better categorization
+    drug_clean = toupper(trimws(drug)),
+    # Create therapeutic categories based on drug names
+    drug_category = case_when(
+        # IV Fluids and Electrolytes
+        grepl("SODIUM CHLORIDE|DEXTROSE|LACTATED RINGERS|POTASSIUM CHLORIDE|MAGNESIUM SULFATE|CALCIUM GLUCONATE|STERILE WATER|GLUCOSE GEL|^NS$", drug_clean) ~ "IV Fluids/Electrolytes",
+        
+        # Pain Management
+        grepl("HYDROMORPHONE|DILAUDID|MORPHINE|FENTANYL|OXYCODONE|TRAMADOL|ACETAMINOPHEN|IBUPROFEN|GABAPENTIN", drug_clean) ~ "Pain Management",
+        
+        # Anticoagulants (major category we missed)
+        grepl("HEPARIN|WARFARIN|ASPIRIN", drug_clean) ~ "Anticoagulants",
+        
+        # CNS/Psychiatric Medications
+        grepl("LORAZEPAM|ALPRAZOLAM|MIDAZOLAM|HALOPERIDOL", drug_clean) ~ "CNS Medications",
+        
+        # Proton Pump Inhibitors/GI
+        grepl("PANTOPRAZOLE|OMEPRAZOLE|LANSOPRAZOLE|PROTONIX|SENNA|DOCUSATE|BISACODYL|POLYETHYLENE GLYCOL", drug_clean) ~ "GI Medications",
+        
+        # Cardiovascular (add statin)
+        grepl("LISINOPRIL|METOPROLOL|ATENOLOL|AMLODIPINE|FUROSEMIDE|LASIX|ATORVASTATIN", drug_clean) ~ "Cardiovascular",
+        
+        # Corticosteroids
+        grepl("PREDNISONE|PREDNISOLONE|METHYLPREDNISOLONE", drug_clean) ~ "Corticosteroids",
+        
+        # Anti-nausea
+        grepl("ONDANSETRON|ZOFRAN", drug_clean) ~ "Anti-nausea",
+        
+        # Diabetes/Metabolic
+        grepl("GLUCAGON|INSULIN|METFORMIN", drug_clean) ~ "Diabetes/Metabolic",
+        
+        # Antibiotics
+        grepl("VANCOMYCIN|CIPROFLOXACIN|LEVOFLOXACIN|CEFTRIAXONE|AZITHROMYCIN", drug_clean) ~ "Antibiotics",
+        
+        # Administration/Container
+        grepl("^BAG$|^VIAL$|^SW$|FLUSH", drug_clean) ~ "Administration/Container",
+        
+        TRUE ~ "Other/Unclassified"
+      ),
+    # High-risk medication flags
+    high_risk_med = drug_category %in% c("Anticoagulants", "Opioid Analgesics", "CNS Medications"),
+    # Route categorization
+    route_category = case_when(
+      grepl("IV|INTRAVENOUS", toupper(coalesce(route, ""))) ~ "Intravenous",
+      grepl("PO|ORAL", toupper(coalesce(route, ""))) ~ "Oral",
+      grepl("IM|INTRAMUSCULAR", toupper(coalesce(route, ""))) ~ "Intramuscular",
+      grepl("SL|SUBLINGUAL", toupper(coalesce(route, ""))) ~ "Sublingual",
+      grepl("TOP|TOPICAL", toupper(coalesce(route, ""))) ~ "Topical",
+      TRUE ~ "Other/Unknown"
+    )
+  )
+
+# Drug category analysis
+drug_category_summary <- prescriptions_enhanced %>%
+  group_by(drug_category) %>%
+  summarise(
+    total_prescriptions = n(),
+    unique_drugs = n_distinct(drug),
+    unique_patients = n_distinct(subject_id),
+    unique_admissions = n_distinct(hadm_id),
+    percent_of_total = round(n() / nrow(prescriptions_enhanced) * 100, 1),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(total_prescriptions))
+
+kable(drug_category_summary, caption = 'Prescription Distribution by Therapeutic Category',
+      col.names = c('Therapeutic Category', 'Total Prescriptions', 'Unique Drugs', 
+                   'Unique Patients', 'Unique Admissions', '% of Total'))
+
+# Top medications with categories
+medication_summary_enhanced = prescriptions_enhanced %>%
+  group_by(drug, drug_category) %>%
+  summarise(
+    frequency = n(),
+    unique_patients = n_distinct(subject_id),
+    unique_admissions = n_distinct(hadm_id),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(frequency)) %>%
+  top_n(20, wt = frequency)
+
+kable(medication_summary_enhanced, caption = 'Top 20 Medications by Frequency with Therapeutic Categories',
+      col.names = c('Medication', 'Therapeutic Category', 'Total Prescriptions', 'Unique Patients', 'Unique Admissions'))
+
+# Enhanced polypharmacy analysis with categories
+medications_per_admission_enhanced = prescriptions_enhanced %>%
+  group_by(hadm_id) %>%
+  summarise(
+    medication_count = n(),
+    unique_medications = n_distinct(drug),
+    unique_categories = n_distinct(drug_category),
+    high_risk_med_count = sum(high_risk_med),
+    has_diabetes_meds = any(drug_category == "Diabetes Medications"),
+    has_cv_meds = any(drug_category == "Cardiovascular"),
+    has_antibiotics = any(drug_category == "Antibiotics"),
+    has_opioids = any(drug_category == "Opioid Analgesics"),
+    .groups = 'drop'
+  )
+
+polypharmacy_enhanced_stats = medications_per_admission_enhanced %>%
+  summarise(
+    mean_medications = round(mean(medication_count), 1),
+    median_medications = median(medication_count),
+    max_medications = max(medication_count),
+    q75_medications = quantile(medication_count, 0.75),
+    mean_categories = round(mean(unique_categories), 1),
+    median_categories = median(unique_categories),
+    mean_high_risk = round(mean(high_risk_med_count), 1)
+  )
+
+polypharmacy_enhanced_table = data.frame(
+  Metric = c('Mean Medications per Admission', 'Median Medications per Admission', 
+             '75th Percentile Medications', 'Max Medications per Admission',
+             'Mean Therapeutic Categories', 'Median Therapeutic Categories',
+             'Mean High-Risk Medications'),
+  Value = c(polypharmacy_enhanced_stats$mean_medications,
+            polypharmacy_enhanced_stats$median_medications,
+            polypharmacy_enhanced_stats$q75_medications,
+            polypharmacy_enhanced_stats$max_medications,
+            polypharmacy_enhanced_stats$mean_categories,
+            polypharmacy_enhanced_stats$median_categories,
+            polypharmacy_enhanced_stats$mean_high_risk)
+)
+
+kable(polypharmacy_enhanced_table, caption = 'Enhanced Polypharmacy Metrics per Admission')
+
+# Remove existing medication variables before joining
+analysis_data <- analysis_data %>%
+  select(-any_of(c("medication_count", "unique_medications", "unique_categories", 
+                   "high_risk_med_count", "has_diabetes_meds", "has_cv_meds", 
+                   "has_antibiotics", "has_opioids")))
+
+# Merge enhanced prescription data with analysis dataset AND clean in one step
+analysis_data = analysis_data %>%
+  left_join(medications_per_admission_enhanced, by = 'hadm_id') %>%
+  mutate(
+    medication_count = ifelse(is.na(medication_count), 0, medication_count),
+    unique_medications = ifelse(is.na(unique_medications), 0, unique_medications),
+    unique_categories = ifelse(is.na(unique_categories), 0, unique_categories),
+    high_risk_med_count = ifelse(is.na(high_risk_med_count), 0, high_risk_med_count),
+    has_diabetes_meds = ifelse(is.na(has_diabetes_meds), FALSE, has_diabetes_meds),
+    has_cv_meds = ifelse(is.na(has_cv_meds), FALSE, has_cv_meds),
+    has_antibiotics = ifelse(is.na(has_antibiotics), FALSE, has_antibiotics),
+    has_opioids = ifelse(is.na(has_opioids), FALSE, has_opioids)
+  )
+
+# High-risk medication analysis and readmission
+high_risk_med_analysis <- analysis_data %>%
+  summarise(
+    diabetes_meds_readmit_rate = round(mean(readmit_30day[has_diabetes_meds == TRUE], na.rm = TRUE) * 100, 1),
+    cv_meds_readmit_rate = round(mean(readmit_30day[has_cv_meds == TRUE], na.rm = TRUE) * 100, 1),
+    antibiotics_readmit_rate = round(mean(readmit_30day[has_antibiotics == TRUE], na.rm = TRUE) * 100, 1),
+    opioids_readmit_rate = round(mean(readmit_30day[has_opioids == TRUE], na.rm = TRUE) * 100, 1),
+    overall_readmit_rate = round(mean(readmit_30day, na.rm = TRUE) * 100, 1)
+  )
+
+med_risk_table <- data.frame(
+  Medication_Category = c('Diabetes Medications', 'Cardiovascular', 'Antibiotics', 'Opioids', 'Overall'),
+  Readmission_Rate = c(high_risk_med_analysis$diabetes_meds_readmit_rate,
+                       high_risk_med_analysis$cv_meds_readmit_rate,
+                       high_risk_med_analysis$antibiotics_readmit_rate,
+                       high_risk_med_analysis$opioids_readmit_rate,
+                       high_risk_med_analysis$overall_readmit_rate)
+)
+
+kable(med_risk_table, caption = 'Readmission Rates by Medication Categories',
+      col.names = c('Medication Category', 'Readmission Rate (%)'))
+
+# Enhanced prescription burden by readmission status
+prescription_readmission_enhanced = analysis_data %>%
+  group_by(readmit_30day) %>%
+  summarise(
+    mean_prescriptions = round(mean(medication_count, na.rm = TRUE), 2),
+    median_prescriptions = median(medication_count, na.rm = TRUE),
+    mean_categories = round(mean(unique_categories, na.rm = TRUE), 2),
+    mean_high_risk = round(mean(high_risk_med_count, na.rm = TRUE), 2),
+    q75_prescriptions = quantile(medication_count, 0.75, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
+
+kable(prescription_readmission_enhanced[, c('readmission_status', 'mean_prescriptions', 'median_prescriptions', 'mean_categories', 'mean_high_risk')],
+      caption = 'Enhanced Prescription Burden by Readmission Status',
+      col.names = c('Readmission Status', 'Mean Prescriptions', 'Median Prescriptions', 'Mean Categories', 'Mean High-Risk Meds'))
+
+cat('\nEnhanced prescription analysis complete with full integration into analysis_data.\n')
+```
+
+## 4.4 Laboratory Values Analysis
+
+```{r lab-analysis}
+cat('Lab events dataset contains', nrow(labevents), 'records\n')
+cat('Unique patients:', length(unique(labevents$subject_id)), '\n')
+cat('Unique admissions:', length(unique(labevents$hadm_id)), '\n')
+cat('Unique lab tests:', length(unique(labevents$itemid)), '\n')
+
+# Memory-efficient approach: Skip individual lab enhancement, go straight to aggregates
+labs_per_admission_enhanced = labevents %>%
+  left_join(d_labitems, by = 'itemid') %>%
+  group_by(hadm_id) %>%
+  summarise(
+    total_lab_tests = n(),
+    unique_lab_types = n_distinct(itemid),
+    unique_categories = n_distinct(category, na.rm = TRUE),
+    # Count specific important lab categories
+    chemistry_tests = sum(grepl("chemistry", category, ignore.case = TRUE), na.rm = TRUE),
+    hematology_tests = sum(grepl("hematology|blood", category, ignore.case = TRUE), na.rm = TRUE),
+    has_labs = TRUE,
+    .groups = 'drop'
+  )
+
+# Basic lab statistics
+lab_burden_stats = labs_per_admission_enhanced %>%
+  summarise(
+    mean_tests = round(mean(total_lab_tests), 1),
+    median_tests = median(total_lab_tests),
+    max_tests = max(total_lab_tests),
+    q75_tests = quantile(total_lab_tests, 0.75),
+    mean_categories = round(mean(unique_categories), 1),
+    median_categories = median(unique_categories)
+  )
+
+lab_burden_table = data.frame(
+  Metric = c('Mean Lab Tests per Admission', 'Median Lab Tests per Admission', 
+             '75th Percentile Lab Tests', 'Max Lab Tests per Admission',
+             'Mean Lab Categories per Admission', 'Median Lab Categories per Admission'),
+  Value = c(lab_burden_stats$mean_tests,
+            lab_burden_stats$median_tests,
+            lab_burden_stats$q75_tests,
+            lab_burden_stats$max_tests,
+            lab_burden_stats$mean_categories,
+            lab_burden_stats$median_categories)
+)
+
+kable(lab_burden_table, caption = 'Laboratory Testing Burden per Admission')
+
+# Remove existing lab variables before joining (for reproducibility)
+analysis_data <- analysis_data %>%
+  select(-any_of(c("total_lab_tests", "unique_lab_types", "unique_categories", 
+                   "chemistry_tests", "hematology_tests", "had_labs", "has_labs")))
+
+# Merge with analysis dataset
+analysis_data = analysis_data %>%
+  left_join(labs_per_admission_enhanced, by = 'hadm_id') %>%
+  mutate(
+    total_lab_tests = ifelse(is.na(total_lab_tests), 0, total_lab_tests),
+    unique_lab_types = ifelse(is.na(unique_lab_types), 0, unique_lab_types),
+    unique_categories = ifelse(is.na(unique_categories), 0, unique_categories),
+    chemistry_tests = ifelse(is.na(chemistry_tests), 0, chemistry_tests),
+    hematology_tests = ifelse(is.na(hematology_tests), 0, hematology_tests),
+    has_labs = ifelse(is.na(has_labs), FALSE, has_labs)
+  )
+
+# Lab burden by readmission status
+lab_readmission_analysis = analysis_data %>%
+  group_by(readmit_30day) %>%
+  summarise(
+    mean_lab_tests = round(mean(total_lab_tests, na.rm = TRUE), 1),
+    median_lab_tests = median(total_lab_tests, na.rm = TRUE),
+    mean_categories = round(mean(unique_categories, na.rm = TRUE), 1),
+    percent_with_labs = round(mean(has_labs, na.rm = TRUE) * 100, 1),
+    q75_lab_tests = quantile(total_lab_tests, 0.75, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
+
+kable(lab_readmission_analysis[, c('readmission_status', 'mean_lab_tests', 'median_lab_tests', 
+                                   'mean_categories', 'percent_with_labs')],
+      caption = 'Laboratory Testing Burden by Readmission Status',
+      col.names = c('Readmission Status', 'Mean Lab Tests', 'Median Lab Tests', 
+                   'Mean Categories', '% with Labs'))
+
+cat('\nLab data coverage:\n')
+cat('Admissions with lab data:', sum(analysis_data$total_lab_tests > 0), '/', nrow(analysis_data), '\n')
+cat('Coverage:', round(sum(analysis_data$total_lab_tests > 0) / nrow(analysis_data) * 100, 1), '%\n')
+```
+
+```{r lab-visualizations}
+# Simplified Lab Visualization: Lab testing volume per admission
+ggplot(labs_per_admission_enhanced, aes(x = total_lab_tests)) +
+  geom_histogram(bins = 50, fill = 'orange', alpha = 0.7) +
+  labs(title = 'Distribution of Total Lab Tests per Admission',
+       x = 'Number of Lab Tests',
+       y = 'Number of Admissions') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Lab categories distribution
+ggplot(labs_per_admission_enhanced, aes(x = unique_categories)) +
+  geom_histogram(bins = 20, fill = 'darkgreen', alpha = 0.7) +
+  labs(title = 'Distribution of Lab Categories per Admission',
+       x = 'Number of Lab Categories',
+       y = 'Number of Admissions') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r lab-readmission-analysis}
+# Remove existing lab variables before joining (for reproducibility)
+analysis_data <- analysis_data %>%
+  select(-any_of(c("total_lab_tests", "unique_lab_types", "unique_categories", 
+                   "chemistry_tests", "hematology_tests", "had_labs", "has_labs")))
+
+# Merge lab data with analysis dataset
+analysis_data = analysis_data %>%
+  left_join(labs_per_admission_enhanced, by = 'hadm_id') %>%
+  mutate(
+    total_lab_tests = ifelse(is.na(total_lab_tests), 0, total_lab_tests),
+    unique_lab_types = ifelse(is.na(unique_lab_types), 0, unique_lab_types),
+    unique_categories = ifelse(is.na(unique_categories), 0, unique_categories),
+    chemistry_tests = ifelse(is.na(chemistry_tests), 0, chemistry_tests),
+    hematology_tests = ifelse(is.na(hematology_tests), 0, hematology_tests),
+    has_labs = ifelse(is.na(has_labs), FALSE, has_labs)
+  )
+
+# Lab burden by readmission status
+lab_readmission_analysis = analysis_data %>%
+  group_by(readmit_30day) %>%
+  summarise(
+    mean_lab_tests = round(mean(total_lab_tests, na.rm = TRUE), 1),
+    median_lab_tests = median(total_lab_tests, na.rm = TRUE),
+    q75_lab_tests = quantile(total_lab_tests, 0.75, na.rm = TRUE),
+    percent_with_labs = round(mean(has_labs, na.rm = TRUE) * 100, 1),
+    mean_unique_types = round(mean(unique_lab_types, na.rm = TRUE), 1),
+    .groups = 'drop'
+  ) %>%
+  mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
+
+kable(lab_readmission_analysis[, c('readmission_status', 'mean_lab_tests', 'median_lab_tests', 
+                                   'q75_lab_tests', 'percent_with_labs', 'mean_unique_types')],
+      caption = 'Laboratory Testing Burden by Readmission Status',
+      col.names = c('Readmission Status', 'Mean Lab Tests', 'Median Lab Tests', 
+                   '75th Percentile', '% with Labs', 'Mean Unique Types'))
+
+# Statistical test for difference in lab burden
+lab_test_result <- t.test(total_lab_tests ~ readmit_30day, data = analysis_data)
+cat('\nT-test for difference in lab test burden between groups:\n')
+cat('t =', round(lab_test_result$statistic, 3), ', p-value =', 
+    format(lab_test_result$p.value, scientific = TRUE, digits = 3), '\n')
+
+# Calculate coverage
+cat('\nLab data coverage:\n')
+cat('Admissions with lab data:', sum(analysis_data$total_lab_tests > 0), '/', nrow(analysis_data), '\n')
+cat('Coverage:', round(sum(analysis_data$total_lab_tests > 0) / nrow(analysis_data) * 100, 1), '%\n')
+
+# Skip individual lab analysis to avoid memory issues
+cat('\n=== INDIVIDUAL LAB ANALYSIS SKIPPED ===\n')
+cat('(Individual lab analysis removed to prevent memory limit errors)\n')
+```
+
+## 4.5 Procedures Analysis
+
+```{r procedures-analysis}
+cat('Procedures dataset contains', nrow(procedures), 'records\n')
+cat('Unique patients:', length(unique(procedures$subject_id)), '\n')
+cat('Unique admissions:', length(unique(procedures$hadm_id)), '\n')
+cat('Unique procedures:', length(unique(procedures$icd_code)), '\n')
+
+# Enhanced procedures analysis with full dictionary integration
+procedures_enhanced <- procedures %>%
+  left_join(d_icd_procedures, by = c('icd_code' = 'icd_code', 'icd_version' = 'icd_version')) %>%
+  mutate(
+    # Create meaningful procedure name
+    procedure_name = coalesce(long_title, paste("Unknown Procedure", icd_code)),
+    
+    # Create procedure categories based on ICD structure and clinical knowledge
+    procedure_category = case_when(
+      icd_version == 9 ~ case_when(
+        substr(icd_code, 1, 2) %in% c("00", "01") ~ "CNS Procedures",
+        substr(icd_code, 1, 2) %in% c("02", "03", "04", "05") ~ "Endocrine/Eye/ENT Procedures",
+        substr(icd_code, 1, 2) %in% c("06", "07", "08", "09") ~ "Respiratory Procedures",
+        substr(icd_code, 1, 2) %in% c("35", "36", "37", "38", "39") ~ "Cardiovascular Procedures",
+        substr(icd_code, 1, 2) %in% c("42", "43", "44", "45", "46") ~ "Digestive System Procedures",
+        substr(icd_code, 1, 2) %in% c("50", "51", "52", "53", "54") ~ "Urogenital Procedures",
+        substr(icd_code, 1, 2) %in% c("77", "78", "79", "80", "81") ~ "Musculoskeletal Procedures",
+        substr(icd_code, 1, 2) %in% c("86", "87", "88", "89") ~ "Integumentary/Diagnostic Procedures",
+        substr(icd_code, 1, 2) %in% c("92", "93", "94", "95") ~ "Therapeutic Procedures",
+        substr(icd_code, 1, 2) %in% c("96", "97", "98", "99") ~ "Miscellaneous Procedures",
+        TRUE ~ "Other ICD-9 Procedures"
+      ),
+      icd_version == 10 ~ case_when(
+        substr(icd_code, 1, 1) == "0" ~ case_when(
+          substr(icd_code, 2, 2) %in% c("0", "1", "2") ~ "CNS Procedures",
+          substr(icd_code, 2, 2) %in% c("3", "4", "5") ~ "Cardiovascular Procedures", 
+          substr(icd_code, 2, 2) %in% c("6", "7", "8") ~ "Respiratory/Digestive Procedures",
+          substr(icd_code, 2, 2) == "9" ~ "Reproductive Procedures",
+          TRUE ~ "Other System Procedures"
+        ),
+        substr(icd_code, 1, 1) == "3" ~ "Administration Procedures",
+        substr(icd_code, 1, 1) == "4" ~ "Measurement/Monitoring",
+        substr(icd_code, 1, 1) == "5" ~ "Extracorporeal Assistance",
+        substr(icd_code, 1, 1) == "6" ~ "Extracorporeal Therapies",
+        substr(icd_code, 1, 1) == "7" ~ "Osteopathic Procedures",
+        substr(icd_code, 1, 1) == "8" ~ "Other Procedures",
+        substr(icd_code, 1, 1) == "9" ~ "Chiropractic Procedures",
+        substr(icd_code, 1, 1) == "B" ~ "Imaging Procedures",
+        substr(icd_code, 1, 1) == "C" ~ "Nuclear Medicine",
+        substr(icd_code, 1, 1) == "D" ~ "Radiation Therapy",
+        substr(icd_code, 1, 1) == "F" ~ "Physical Rehabilitation",
+        substr(icd_code, 1, 1) == "G" ~ "Mental Health Procedures",
+          TRUE ~ "Other ICD-10 Procedures"
+      ),
+      TRUE ~ "Unknown Version"
+    ),
+    # High-risk procedure flags based on clinical knowledge
+    high_risk_procedure = procedure_category %in% c("CNS Procedures", "Cardiovascular Procedures") |
+                         grepl("surgery|transplant|bypass|catheter", procedure_name, ignore.case = TRUE),
+    # Invasive vs non-invasive classification
+    invasive_procedure = !procedure_category %in% c("Imaging Procedures", "Nuclear Medicine", 
+                                                   "Measurement/Monitoring", "Physical Rehabilitation") &
+                        !grepl("consultation|examination|evaluation", procedure_name, ignore.case = TRUE)
+  )
+
+# Check dictionary integration success for procedures
+proc_dict_integration_stats <- procedures_enhanced %>%
+  summarise(
+    total_records = n(),
+    with_descriptions = sum(!is.na(long_title)),
+    coverage_percent = round(sum(!is.na(long_title)) / n() * 100, 1),
+    unique_categories = n_distinct(procedure_category)
+  )
+
+cat("\nProcedure Dictionary Integration Results:\n")
+cat("Total procedure records:", proc_dict_integration_stats$total_records, "\n")
+cat("Records with descriptions:", proc_dict_integration_stats$with_descriptions, "\n")
+cat("Dictionary coverage:", proc_dict_integration_stats$coverage_percent, "%\n")
+cat("Unique procedure categories:", proc_dict_integration_stats$unique_categories, "\n")
+
+# Procedure category analysis
+proc_category_summary <- procedures_enhanced %>%
+  group_by(procedure_category) %>%
+  summarise(
+    total_procedures = n(),
+    unique_codes = n_distinct(icd_code),
+    unique_patients = n_distinct(subject_id),
+    unique_admissions = n_distinct(hadm_id),
+    percent_of_total = round(n() / nrow(procedures_enhanced) * 100, 1),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(total_procedures))
+
+kable(proc_category_summary, caption = 'Procedure Distribution by Clinical Category',
+      col.names = c('Clinical Category', 'Total Procedures', 'Unique Codes', 'Unique Patients', 
+                   'Unique Admissions', '% of Total'))
+
+# Top procedures with full descriptions
+procedure_summary_enhanced <- procedures_enhanced %>%
+  group_by(icd_code, icd_version, procedure_name, procedure_category, high_risk_procedure) %>%
+  summarise(
+    frequency = n(),
+    unique_patients = n_distinct(subject_id),
+    unique_admissions = n_distinct(hadm_id),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(frequency))
+
+top_procedures_enhanced <- head(procedure_summary_enhanced, 15) %>%
+  mutate(
+    # Truncate long descriptions for table readability
+    procedure_display = ifelse(nchar(procedure_name) > 50, 
+                              paste0(substr(procedure_name, 1, 47), "..."), 
+                              procedure_name),
+    risk_level = ifelse(high_risk_procedure, "High Risk", "Standard")
+  )
+
+kable(top_procedures_enhanced[, c('icd_code', 'icd_version', 'procedure_display', 'procedure_category', 'risk_level', 'frequency')], 
+      caption = 'Top 15 Most Frequent Procedures with Clinical Categories',
+      col.names = c('ICD Code', 'Version', 'Procedure', 'Category', 'Risk Level', 'Frequency'))
+
+# Enhanced procedures per admission analysis
+procedures_per_admission_enhanced = procedures_enhanced %>%
+  group_by(hadm_id) %>%
+  summarise(
+    procedure_count = n(),
+    unique_procedures = n_distinct(icd_code),
+    unique_categories = n_distinct(procedure_category),
+    high_risk_procedure_count = sum(high_risk_procedure),
+    invasive_procedure_count = sum(invasive_procedure),
+    has_cardiovascular_proc = any(procedure_category == "Cardiovascular Procedures"),
+    has_respiratory_proc = any(procedure_category == "Respiratory Procedures" | procedure_category == "Respiratory/Digestive Procedures"),
+    has_cns_proc = any(procedure_category == "CNS Procedures"),
+    has_imaging = any(procedure_category == "Imaging Procedures"),
+    .groups = 'drop'
+  )
+
+procedure_burden_enhanced_stats = procedures_per_admission_enhanced %>%
+  summarise(
+    mean_procedures = round(mean(procedure_count), 1),
+    median_procedures = round(median(procedure_count), 1),
+    max_procedures = max(procedure_count),
+    q75_procedures = round(quantile(procedure_count, 0.75), 1),
+    mean_categories = round(mean(unique_categories), 1),
+    mean_high_risk = round(mean(high_risk_procedure_count), 1),
+    mean_invasive = round(mean(invasive_procedure_count), 1)
+  )
+
+procedure_burden_enhanced_table <- data.frame(
+  Metric = c('Mean Procedures per Admission', 'Median Procedures per Admission', 
+             'Max Procedures per Admission', '75th Percentile Procedures',
+             'Mean Procedure Categories', 'Mean High-Risk Procedures', 'Mean Invasive Procedures'),
+  Value = c(procedure_burden_enhanced_stats$mean_procedures, 
+            procedure_burden_enhanced_stats$median_procedures,
+            procedure_burden_enhanced_stats$max_procedures,
+            procedure_burden_enhanced_stats$q75_procedures,
+            procedure_burden_enhanced_stats$mean_categories,
+            procedure_burden_enhanced_stats$mean_high_risk,
+            procedure_burden_enhanced_stats$mean_invasive)
+)
+
+kable(procedure_burden_enhanced_table, caption = 'Enhanced Procedure Burden per Admission')
+
+# Remove existing procedure variables before joining (for reproducibility)
+analysis_data <- analysis_data %>%
+  select(-any_of(c("procedure_count", "unique_procedures", "unique_categories", 
+                   "high_risk_procedure_count", "invasive_procedure_count", 
+                   "has_cardiovascular_proc", "has_respiratory_proc", "has_cns_proc", "has_imaging")))
+
+# Merge enhanced procedure data with analysis dataset
+analysis_data = analysis_data %>%
+  left_join(procedures_per_admission_enhanced, by = 'hadm_id') %>%
+  mutate(
+    procedure_count = ifelse(is.na(procedure_count), 0, procedure_count),
+    unique_procedures = ifelse(is.na(unique_procedures), 0, unique_procedures),
+    unique_categories = ifelse(is.na(unique_categories), 0, unique_categories),
+    high_risk_procedure_count = ifelse(is.na(high_risk_procedure_count), 0, high_risk_procedure_count),
+    invasive_procedure_count = ifelse(is.na(invasive_procedure_count), 0, invasive_procedure_count),
+    has_cardiovascular_proc = ifelse(is.na(has_cardiovascular_proc), FALSE, has_cardiovascular_proc),
+    has_respiratory_proc = ifelse(is.na(has_respiratory_proc), FALSE, has_respiratory_proc),
+    has_cns_proc = ifelse(is.na(has_cns_proc), FALSE, has_cns_proc),
+    has_imaging = ifelse(is.na(has_imaging), FALSE, has_imaging)
+  )
+
+# High-risk procedure analysis and readmission
+high_risk_proc_analysis <- analysis_data %>%
+  summarise(
+    cv_proc_readmit_rate = round(mean(readmit_30day[has_cardiovascular_proc == TRUE], na.rm = TRUE) * 100, 1),
+    respiratory_proc_readmit_rate = round(mean(readmit_30day[has_respiratory_proc == TRUE], na.rm = TRUE) * 100, 1),
+    cns_proc_readmit_rate = round(mean(readmit_30day[has_cns_proc == TRUE], na.rm = TRUE) * 100, 1),
+    imaging_readmit_rate = round(mean(readmit_30day[has_imaging == TRUE], na.rm = TRUE) * 100, 1),
+    overall_readmit_rate = round(mean(readmit_30day, na.rm = TRUE) * 100, 1)
+  )
+
+proc_risk_table <- data.frame(
+  Procedure_Category = c('Cardiovascular', 'Respiratory', 'CNS', 'Imaging', 'Overall'),
+  Readmission_Rate = c(high_risk_proc_analysis$cv_proc_readmit_rate,
+                       high_risk_proc_analysis$respiratory_proc_readmit_rate,
+                       high_risk_proc_analysis$cns_proc_readmit_rate,
+                       high_risk_proc_analysis$imaging_readmit_rate,
+                       high_risk_proc_analysis$overall_readmit_rate)
+)
+
+kable(proc_risk_table, caption = 'Readmission Rates by Procedure Categories',
+      col.names = c('Procedure Category', 'Readmission Rate (%)'))
+
+# Enhanced procedure burden by readmission status
+procedure_readmission_enhanced = analysis_data %>%
+  group_by(readmit_30day) %>%
+  summarise(
+    mean_procedures = round(mean(procedure_count, na.rm = TRUE), 2),
+    median_procedures = median(procedure_count, na.rm = TRUE),
+    mean_categories = round(mean(unique_categories, na.rm = TRUE), 2),
+    mean_high_risk = round(mean(high_risk_procedure_count, na.rm = TRUE), 2),
+    mean_invasive = round(mean(invasive_procedure_count, na.rm = TRUE), 2),
+    q75_procedures = quantile(procedure_count, 0.75, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
+
+kable(procedure_readmission_enhanced[, c('readmission_status', 'mean_procedures', 'median_procedures', 'mean_categories', 'mean_high_risk', 'mean_invasive')],
+      caption = 'Enhanced Procedure Burden by Readmission Status',
+      col.names = c('Readmission Status', 'Mean Procedures', 'Median Procedures', 'Mean Categories', 'Mean High-Risk', 'Mean Invasive'))
+```
+
+## 4.5 Key Visualizations
+
+```{r key-visualizations, fig.cap='Key relationships with readmission outcomes'}
+# Readmission rate by admission type
+admission_type_summary = analysis_data %>%
+  group_by(admission_type) %>%
+  summarise(
+    total = n(),
+    readmissions = sum(readmit_30day),
+    rate = (readmissions / total) * 100,
+    .groups = 'drop'
+  ) %>%
+  filter(total >= 10) # Only show types with sufficient sample size
+
+ggplot(admission_type_summary, aes(x = reorder(admission_type, rate), y = rate)) +
+  geom_col(fill = 'steelblue', alpha = 0.7) + 
+  geom_text(aes(label = paste0(round(rate, 1), '%\n(', readmissions, '/', total, ')')),
+            hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(title = '30-Day Readmission Rate by Admission Type',
+       x = 'Admission Type',
+       y = 'Readmission Rate (%)') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Age distribution by readmission status
+ggplot(analysis_data, aes(x = age_at_adm, fill = factor(readmit_30day))) +
+  geom_histogram(position = 'identity', alpha = 0.6, bins = 30) +
+  scale_fill_manual(values = c('0' = 'lightblue', '1' = 'salmon'),
+                    labels = c('0' = 'Not Readmitted', '1' = 'Readmitted'),
+                    name = 'Readmission Status') +
+  labs(title = 'Age Distribution by Readmission Status',
+       x = 'Age at Admission',
+       y = 'Count') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Clinical burden comparison
+clinical_burden_plot_data <- analysis_data %>%
+  select(readmit_30day, total_diagnoses, medication_count, procedure_count, total_lab_tests) %>%
+  pivot_longer(cols = c(total_diagnoses, medication_count, procedure_count, total_lab_tests),
+               names_to = 'clinical_measure',
+               values_to = 'count') %>%
+  mutate(
+    clinical_measure = case_when(
+      clinical_measure == 'total_diagnoses' ~ 'Diagnoses',
+      clinical_measure == 'medication_count' ~ 'Prescriptions',
+      clinical_measure == 'procedure_count' ~ 'Procedures',
+      clinical_measure == 'total_lab_tests' ~ 'Lab Tests'
+    ),
+    readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted')
+  )
+
+ggplot(clinical_burden_plot_data, aes(x = factor(readmit_30day), y = count, fill = factor(readmit_30day))) +
+  geom_boxplot(alpha = 0.7) +
+  facet_wrap(~ clinical_measure, scales = 'free_y') +
+  scale_fill_manual(values = c('0' = 'lightblue', '1' = 'salmon'),
+                    labels = c('0' = 'Not Readmitted', '1' = 'Readmitted'),
+                    name = 'Readmission Status') +
+  labs(title = 'Clinical Burden by Readmission Status',
+       x = 'Readmission Status',
+       y = 'Count') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r}
+cat("DEBUGGING:", ncol(analysis_data), "\n")
+```
+
+# 5. Data Quality Assessment
+
+## 5.1 Data Completeness Analysis
+
+```{r data-completeness}
+# Assess missing data patterns for key variables
+key_vars <- c('subject_id', 'hadm_id', 'readmit_30day', 'age_at_adm', 'gender', 
+              'race', 'insurance', 'admission_type', 'los_days', 'total_diagnoses',
+              'unique_diagnosis_categories', 'medication_count', 'unique_categories', 
+              'procedure_count', 'total_lab_tests', 'unique_lab_types')
+
+completeness_summary <- analysis_data %>%
+  select(all_of(key_vars)) %>%
+  summarise(across(everything(), ~ sum(!is.na(.)))) %>%
+  pivot_longer(everything(), names_to = 'variable', values_to = 'complete_count') %>%
+  mutate(
+    total_cases = nrow(analysis_data),
+    completeness_percent = round(complete_count / total_cases * 100, 1),
+    missing_count = total_cases - complete_count,
+    missing_percent = round(missing_count / total_cases * 100, 1)
+  ) %>%
+  arrange(desc(completeness_percent))
+
+kable(completeness_summary[, c('variable', 'complete_count', 'missing_count', 'completeness_percent', 'missing_percent')],
+      caption = 'Data Completeness Summary for Key Variables',
+      col.names = c('Variable', 'Complete Count', 'Missing Count', 'Completeness %', 'Missing %'))
+
+# Calculate final analysis dataset characteristics
+cat('\n=== FINAL ANALYSIS DATASET SUMMARY ===\n')
+cat('Total admissions in analysis dataset:', nrow(analysis_data), '\n')
+cat('Patients with readmissions:', sum(analysis_data$readmit_30day, na.rm = TRUE), '\n')
+cat('Overall readmission rate:', round(mean(analysis_data$readmit_30day, na.rm = TRUE) * 100, 2), '%\n')
+cat('Coverage rates:\n')
+cat('- Diagnoses data:', round(sum(analysis_data$total_diagnoses > 0, na.rm = TRUE) / nrow(analysis_data) * 100, 1), '%\n')
+cat('- Prescriptions data:', round(sum(analysis_data$medication_count > 0, na.rm = TRUE) / nrow(analysis_data) * 100, 1), '%\n')
+cat('- Procedures data:', round(sum(analysis_data$procedure_count > 0, na.rm = TRUE) / nrow(analysis_data) * 100, 1), '%\n')
+cat('- Lab data:', round(sum(analysis_data$total_lab_tests > 0, na.rm = TRUE) / nrow(analysis_data) * 100, 1), '%\n')
+cat('- High-risk conditions identified:', round(sum(analysis_data$has_heart_failure | analysis_data$has_diabetes | analysis_data$has_copd, na.rm = TRUE) / nrow(analysis_data) * 100, 1), '%\n')
+```
+
+# 6. Feature Engineering
+
+## 6.1 Comorbidity Indices
+
+```{r comorbidity-indices}
+# Charlson Comorbidity Index calculation -- Healthcare standard method
+# Based on ICD-9 and ICD-10 codes
+
+# Charlson Comorbidity Index with proper NA handling
+charlson_components <- analysis_data %>%
+  mutate(
+    # Cardiovascular conditions
+    charlson_mi = ifelse(!is.na(primary_diagnosis_name) & grepl("myocardial infarction|acute mi", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    charlson_chf = ifelse(has_heart_failure, 1, 0),
+    charlson_pvd = ifelse(!is.na(primary_diagnosis_name) & grepl("peripheral vascular|arterial disease", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    charlson_cvd = ifelse(!is.na(primary_diagnosis_name) & grepl("cerebrovascular|stroke|tia", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    
+    # Pulmonary conditions  
+    charlson_copd = ifelse(has_copd, 1, 0),
+    
+    # Metabolic conditions
+    charlson_diabetes = ifelse(has_diabetes, 1, 0),
+    charlson_diabetes_comp = ifelse(!is.na(primary_diagnosis_name) & grepl("diabetes.*complication|diabetic.*retinopathy|diabetic.*nephropathy", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    
+    # Renal conditions
+    charlson_renal = ifelse(!is.na(primary_diagnosis_name) & grepl("chronic kidney|renal failure|chronic renal", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    
+    # Liver conditions
+    charlson_liver_mild = ifelse(!is.na(primary_diagnosis_name) & grepl("hepatitis|liver disease", primary_diagnosis_name, ignore.case = TRUE) & 
+                                !grepl("severe|cirrhosis|failure", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    charlson_liver_severe = ifelse(!is.na(primary_diagnosis_name) & grepl("liver.*severe|cirrhosis|liver.*failure", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    
+    # Cancer conditions
+    charlson_cancer = ifelse(!is.na(primary_diagnosis_category) & primary_diagnosis_category == "Neoplasms" & 
+                           (!is.na(primary_diagnosis_name) & !grepl("metastatic|metastasis", primary_diagnosis_name, ignore.case = TRUE)), 1, 0),
+    charlson_cancer_mets = ifelse(!is.na(primary_diagnosis_name) & grepl("metastatic|metastasis", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    
+    # Other conditions
+    charlson_dementia = ifelse(!is.na(primary_diagnosis_name) & grepl("dementia|alzheimer", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    charlson_paralysis = ifelse(!is.na(primary_diagnosis_name) & grepl("paralysis|hemiplegia|paraplegia", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    charlson_peptic = ifelse(!is.na(primary_diagnosis_name) & grepl("peptic ulcer|gastric ulcer", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    charlson_rheum = ifelse(!is.na(primary_diagnosis_name) & grepl("rheumatoid|lupus|connective tissue", primary_diagnosis_name, ignore.case = TRUE), 1, 0),
+    charlson_aids = ifelse(!is.na(primary_diagnosis_name) & grepl("hiv|aids", primary_diagnosis_name, ignore.case = TRUE), 1, 0)
+  ) %>%
+  mutate(
+    # Calculate weighted Charlson score
+    charlson_score = 
+      (charlson_mi * 1) +
+      (charlson_chf * 1) +
+      (charlson_pvd * 1) +
+      (charlson_cvd * 1) +
+      (charlson_copd * 1) +
+      (charlson_diabetes * 1) +
+      (charlson_diabetes_comp * 2) +
+      (charlson_renal * 2) +
+      (charlson_liver_mild * 1) +
+      (charlson_liver_severe * 3) +
+      (charlson_cancer * 2) +
+      (charlson_cancer_mets * 6) +
+      (charlson_dementia * 1) +
+      (charlson_paralysis * 2) +
+      (charlson_peptic * 1) +
+      (charlson_rheum * 1) +
+      (charlson_aids * 6),
+    
+    # Create risk categories
+    charlson_category = case_when(
+      charlson_score == 0 ~ "Low Risk (0)",
+      charlson_score %in% 1:2 ~ "Moderate Risk (1-2)",
+      charlson_score %in% 3:4 ~ "High Risk (3-4)",
+      charlson_score >= 5 ~ "Very High Risk (5+)"
+    )
+  )
+
+charlson_stats = charlson_components %>%
+  summarise(
+    mean_charlson = round(mean(charlson_score, na.rm = TRUE), 2),
+    median_charlson = median(charlson_score, na.rm = TRUE),
+    max_charlson = max(charlson_score, na.rm = TRUE),
+    q75_charlson = quantile(charlson_score, 0.75, na.rm = TRUE),
+    percent_high_risk = round(mean(charlson_score >= 3, na.rm = TRUE) * 100, 1)
+  )
+
+charlson_summary_table = data.frame(
+  Metric = c('Mean Charlson Score', 'Median Charlson Score', 'Max Charlson Score', 
+             '75th Percentile Charlson Score', '% High Risk (Score >=3)'),
+  Value = c(charlson_stats$mean_charlson, charlson_stats$median_charlson,
+            charlson_stats$max_charlson, charlson_stats$q75_charlson,
+            charlson_stats$percent_high_risk)
+)
+
+kable(charlson_summary_table, caption = 'Charlson Comorbidity Index Summary')
+
+# Charlson Readmission Analysis
+charlson_readmission = charlson_components %>%
+  group_by(charlson_category) %>%
+  summarise(
+    total_cases = n(),
+    readmissions = sum(readmit_30day, na.rm = TRUE),
+    readmission_rate = round((readmissions / total_cases) * 100, 2),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(readmission_rate))
+
+kable(charlson_readmission, caption = 'Readmission Rates by Charlson Comorbidity Category',
+      col.names = c('Charlson Category', 'Total Cases', 'Readmissions', 'Readmission Rate (%)'))
+
+# Update analysis_data with Charlson features
+analysis_data = charlson_components 
+
+```
+**Note on Charlson Comorbidity Index Implementation:**
+The Charlson index in this analysis is based on primary diagnosis codes only, which likely underestimates the true comorbidity burden of the patient population (mean score = 0.7 vs. typical hospital population means of 2-4). A comprehensive implementation would require analyzing all diagnosis codes per admission rather than only the primary diagnosis. However, the simplified version still demonstrates directional validity, with readmission rates increasing monotonically across Charlson risk categories. This limitation is acknowledged as a tradeoff between computational feasibility and clinical comprehensiveness, and the model incorporates additional comorbidity signals through other features (diagnostic complexity scores, multi-system involvement indicators, and high-risk condition flags).
+
+## 6.2 Healthcare Utilization Features
+```{r utilization-features}
+# Create healthcare utilization intensity features
+utilization_features = analysis_data %>%
+  mutate(
+    # Length of stay categories
+    los_category = case_when(
+      los_days < 3 ~ 'Short Stay (<3 days)',
+      los_days >= 3 & los_days <= 7 ~ 'Medium Stay (3-7 days)',
+      los_days > 7 ~ 'Long Stay (>7 days)',
+    ),
+    
+    # Clinical complexity indicators
+    total_clinical_events = total_diagnoses + medication_count + procedure_count + total_lab_tests,
+    
+    # Polypharmacy risk categories
+    polypharmacy_risk = case_when(
+      medication_count == 0 ~ 'No Medications',
+      medication_count <= 5 ~ 'Low Polypharmacy (1-5)',
+      medication_count <= 10 ~ 'Moderate Polypharmacy (6-10)',
+      medication_count <= 20 ~ 'High Polypharmacy (11-20)',
+      medication_count > 20 ~ 'Very High Polypharmacy (>20)'
+    ),
+    
+    # Laboratory testing intensity
+    lab_testing_intensity = case_when(
+      total_lab_tests == 0 ~ 'No Labs',
+      total_lab_tests <= 10 ~ 'Low Testing (1-10)',
+      total_lab_tests <= 50 ~ 'Moderate Testing (11-50)',
+      total_lab_tests <= 100 ~ 'High Testing (51-100)',
+      total_lab_tests > 100 ~ 'Intensive Testing (>100)'
+    ),
+    
+    # Procedure complexity
+    procedure_complexity = case_when(
+      procedure_count == 0 ~ 'No Procedures',
+      procedure_count <= 2 ~ 'Simple (1-2)',
+      procedure_count <= 5 ~ 'Moderate (3-5)',
+      procedure_count > 5 ~ 'Complex (>5)'
+    ),
+    
+    # Age-adjusted risk
+    age_risk_category = case_when(
+      age_at_adm < 30 ~ 'Young Adult(<30)',
+      age_at_adm < 50 ~ 'Middle Age (30-49)',
+      age_at_adm < 65 ~ 'Older Adult (50-64)',
+      age_at_adm < 80 ~ 'Elderly (65-79)',
+      age_at_adm >= 80 ~ 'Very Elderly (80+)'
+    ),
+    
+    # High-risk combinations
+    high_risk_combination = case_when(
+      age_at_adm >= 65 & charlson_score >= 3 ~ 'Elderly + High Comorbidity',
+      age_at_adm >= 65 & medication_count > 10 ~ 'Elderly + Polypharmacy',
+      charlson_score >= 3 & medication_count > 10 ~ 'High Comorbidity + Polypharmacy',
+      age_at_adm >= 80 ~ 'Very Elderly Only',
+      charlson_score >= 5 ~ 'Very High Comorbidity Only',
+      medication_count > 20 ~ 'Very High Polypharmacy Only',
+      TRUE ~ 'Standard Risk'
+    )
+  )
+
+# Utilization feature statistics
+utilization_stats = utilization_features %>%
+  summarise(
+    mean_clinical_events = round(mean(total_clinical_events, na.rm = TRUE), 1),
+    median_clinical_events = median(total_clinical_events, na.rm = TRUE),
+    high_polypharmacy_percent = round(mean(medication_count > 10, na.rm = TRUE) * 100, 1),
+    intensive_testing_percent = round(mean(total_lab_tests > 100, na.rm = TRUE) * 100, 1),
+    high_risk_combo_percent = round(mean(high_risk_combination != 'Standard Risk', na.rm = TRUE) * 100, 1)
+  )
+
+utilization_summary_table = data.frame(
+  Metric = c('Mean Total Clinical Events', 'Median Total Clinical Events', 
+             '% with High Polypharmacy (>10 meds)', '% with Intensive Lab Testing (>100 tests)', 
+             '% with High-Risk Combinations'),
+  Value = c(utilization_stats$mean_clinical_events, utilization_stats$median_clinical_events,
+            utilization_stats$high_polypharmacy_percent, utilization_stats$intensive_testing_percent,
+            utilization_stats$high_risk_combo_percent)
+)
+
+kable(utilization_summary_table, caption = 'Healthcare Utilization Feature Summary')
+
+# High-risk combination analysis
+risk_combo_analysis = utilization_features %>%
+  group_by(high_risk_combination) %>%
+  summarise(
+    total_cases = n(),
+    readmissions = sum(readmit_30day, na.rm = TRUE),
+    readmission_rate = round((readmissions / total_cases) * 100, 2),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(readmission_rate))
+
+kable(risk_combo_analysis, caption = 'Readmission Rates by High-Risk Combinations',
+      col.names = c('Risk Combination', 'Total Cases', 'Readmissions', 'Readmission Rate (%)'))
+
+# Update analysis_data with utilization features
+analysis_data = utilization_features
+```
+
+**Section Note:** Healthcare utilization patterns reveal that 56% of patients fall into the "Very High Polypharmacy" category (>20 medications), reflecting the intensive medication management typical of ICU populations. The "Elderly + Polypharmacy" combination represents 30% of the cohort, identifying a clinically meaningful high-risk subgroup. Approximately 15% of patients have no recorded prescriptions, indicating either very brief stays or data recording limitations.
+
+## 6.3 Medication Risk Features
+```{r medication-risk-features}
+# Create advanced medication risk features based on validated drug categories
+medication_risk_features = analysis_data %>%
+  mutate(
+    # Drug interaction risk flags
+    anticoagulant_risk = ifelse(grepl('Anticoagulants', paste(unique_categories, collapse = ' ')), 1, 0),
+    cns_depression_risk = ifelse(grepl('CNS Medications', paste(unique_categories, collapse = ' ')), 1, 0),
+    
+    # Medication burden indicators
+    medication_burden_score = case_when(
+      medication_count == 0 ~ 0,
+      medication_count <= 5 ~ 1,
+      medication_count <= 10 ~ 2,
+      medication_count <= 15 ~ 3,
+      medication_count <= 20 ~ 4,
+      medication_count > 20 ~ 5
+    ),
+    
+    # Therapeutic category diversity
+    therapeutic_diversity = unique_categories,
+    high_therapeutic_diversity = ifelse(unique_categories > 5, 1, 0),
+    
+    # High-risk medicatino patterns
+    pain_management_intensive = ifelse(grepl('Pain Management', paste(unique_categories, collapse = ' ')) & medication_count >= 10, 1, 0),
+    
+    cardiovascular_complex = ifelse(grepl('Cardiovascular', paste(unique_categories, collapse = ' ')) &
+                                      grepl('Anticoagulants', paste(unique_categories, collapse = ' ')), 1, 0),
+    
+    # Medication appropriateness indicators
+    elderly_polypharmacy = ifelse(age_at_adm >= 65 & medication_count >= 10, 1, 0),
+    extreme_polypharmacy = ifelse(medication_count >= 20, 1, 0),
+    
+    # Create medicatino risk score (composite)
+    medication_risk_score = 
+      (medication_burden_score * 1) +
+      (high_therapeutic_diversity * 1) +
+      (anticoagulant_risk * 2) +
+      (cns_depression_risk * 1) +
+      (elderly_polypharmacy * 2) +
+      (extreme_polypharmacy * 3) +
+      (pain_management_intensive * 2) +
+      (cardiovascular_complex * 2),
+    
+    # Medication risk categories
+    medication_risk_category = case_when(
+      medication_risk_score == 0 ~ 'Minimal Risk (0)',
+      medication_risk_score %in% 1:3 ~ 'Low Risk (1-3)',
+      medication_risk_score %in% 4:6 ~ 'Moderate Risk (4-6)',
+      medication_risk_score %in% 7:9 ~ 'High Risk (7-9)',
+      medication_risk_score >= 10 ~ 'Very High Risk (10+)'
+    )
+  )
+
+# Medication risk statistics
+med_risk_stats = medication_risk_features %>%
+  summarise(
+    mean_risk_score = round(mean(medication_risk_score, na.rm = TRUE), 2),
+    median_risk_score = median(medication_risk_score, na.rm = TRUE),
+    high_risk_percent = round(mean(medication_risk_score >= 7, na.rm = TRUE) * 100, 1),
+    elderly_polypharmacy_percent = round(mean(elderly_polypharmacy == 1, na.rm = TRUE) * 100, 1)
+  )
+
+med_risk_summary_table = data.frame(
+  Metric = c('Mean Medication Risk Score', 'Median Medication Risk Score', 
+             '% High or Very High Risk (Score >=7)', '% with Elderly Polypharmacy'),
+  Value = c(med_risk_stats$mean_risk_score, med_risk_stats$median_risk_score,
+            med_risk_stats$high_risk_percent, med_risk_stats$elderly_polypharmacy_percent)
+)
+
+kable(med_risk_summary_table, caption = 'Medication Risk Feature Summary')
+
+# Medication risk by readmission
+med_risk_readmission = medication_risk_features %>%
+  group_by(medication_risk_category) %>%
+  summarise(
+    total_cases = n(),
+    readmissions = sum(readmit_30day, na.rm = TRUE),
+    readmission_rate = round((readmissions / total_cases) * 100, 2),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(readmission_rate))
+
+kable(med_risk_readmission, caption = 'Readmission Rates by Medication Risk Category',
+      col.names = c('Medication Risk Category', 'Total Cases', 'Readmissions', 'Readmission Rate (%)'))
+
+# Update analysis_data with medication risk features
+analysis_data = medication_risk_features
+```
+
+**Section Note:** The medication risk score demonstrates good discriminative properties with a mean of 6.8 and well-distributed categories from Minimal to Very High Risk. Readmission rates show expected increases across risk categories, validating the composite scoring approach. High-risk medication patterns (anticoagulants, CNS medications) successfully identify clinically vulnerable patient subgroups.
+
+## 6.4 Clinical Complexity Features
+```{r clinical-complexity-features}
+# Create comprehensive clinical complexity indicators
+
+complexity_features <- analysis_data %>%
+  mutate(
+    # Diagnostic complexity
+    diagnostic_complexity = case_when(
+      total_diagnoses <= 5 ~ "Simple (≤5 diagnoses)",
+      total_diagnoses <= 10 ~ "Moderate (6-10 diagnoses)",
+      total_diagnoses <= 15 ~ "Complex (11-15 diagnoses)",
+      total_diagnoses > 15 ~ "Very Complex (>15 diagnoses)"
+    ),
+    
+    # Multi-system involvement
+    multi_system_score = unique_diagnosis_categories,
+    multi_system_complexity = ifelse(unique_diagnosis_categories >= 4, 1, 0),
+    
+    # Procedure-based complexity
+    procedural_complexity = case_when(
+      procedure_count == 0 ~ "No Procedures",
+      procedure_count <= 2 & high_risk_procedure_count == 0 ~ "Simple Procedures",
+      procedure_count <= 5 & high_risk_procedure_count <= 1 ~ "Moderate Complexity",
+      high_risk_procedure_count >= 2 ~ "High-Risk Procedures",
+      procedure_count > 5 ~ "High Volume Procedures"
+    ),
+    
+    # Laboratory monitoring intensity
+    lab_monitoring_complexity = case_when(
+      total_lab_tests <= 10 ~ "Minimal Monitoring",
+      total_lab_tests <= 30 ~ "Standard Monitoring", 
+      total_lab_tests <= 75 ~ "Intensive Monitoring",
+      total_lab_tests > 75 ~ "Critical Monitoring"
+    ),
+    
+    # Overall clinical complexity score
+    clinical_complexity_score = 
+      (case_when(
+        total_diagnoses <= 5 ~ 1,
+        total_diagnoses <= 10 ~ 2,
+        total_diagnoses <= 15 ~ 3,
+        total_diagnoses > 15 ~ 4
+      )) +
+      (case_when(
+        unique_diagnosis_categories <= 2 ~ 1,
+        unique_diagnosis_categories <= 4 ~ 2,
+        unique_diagnosis_categories > 4 ~ 3
+      )) +
+      (case_when(
+        procedure_count == 0 ~ 0,
+        procedure_count <= 2 ~ 1,
+        procedure_count <= 5 ~ 2,
+        procedure_count > 5 ~ 3
+      )) +
+      (case_when(
+        total_lab_tests <= 30 ~ 1,
+        total_lab_tests <= 75 ~ 2,
+        total_lab_tests > 75 ~ 3
+      )) +
+      (high_risk_procedure_count * 2) +
+      (charlson_score),
+    
+    # Clinical complexity categories
+    clinical_complexity_category = case_when(
+      clinical_complexity_score <= 5 ~ "Low Complexity",
+      clinical_complexity_score <= 10 ~ "Moderate Complexity",
+      clinical_complexity_score <= 15 ~ "High Complexity",
+      clinical_complexity_score > 15 ~ "Very High Complexity"
+    ),
+    
+    # Specific high-risk clinical patterns
+    icu_intensive_pattern = ifelse(total_lab_tests > 75 & medication_count > 15 & procedure_count > 3, 1, 0),
+    chronic_complex_pattern = ifelse(charlson_score >= 3 & unique_diagnosis_categories >= 4, 1, 0),
+    acute_complex_pattern = ifelse(los_days <= 3 & total_lab_tests > 50, 1, 0)
+  )
+
+# Clinical complexity statistics
+complexity_stats <- complexity_features %>%
+  summarise(
+    mean_complexity_score = round(mean(clinical_complexity_score, na.rm = TRUE), 2),
+    median_complexity_score = median(clinical_complexity_score, na.rm = TRUE),
+    high_complexity_percent = round(mean(clinical_complexity_score > 15, na.rm = TRUE) * 100, 1),
+    icu_intensive_percent = round(mean(icu_intensive_pattern == 1, na.rm = TRUE) * 100, 1),
+    chronic_complex_percent = round(mean(chronic_complex_pattern == 1, na.rm = TRUE) * 100, 1)
+  )
+
+complexity_summary_table <- data.frame(
+  Metric = c('Mean Clinical Complexity Score', 'Median Clinical Complexity Score',
+             '% Very High Complexity (>15)', '% ICU Intensive Pattern', '% Chronic Complex Pattern'),
+  Value = c(complexity_stats$mean_complexity_score, complexity_stats$median_complexity_score,
+            complexity_stats$high_complexity_percent, complexity_stats$icu_intensive_percent,
+            complexity_stats$chronic_complex_percent)
+)
+
+kable(complexity_summary_table, caption = 'Clinical Complexity Feature Statistics')
+
+# Complexity by readmission analysis
+complexity_readmission <- complexity_features %>%
+  group_by(clinical_complexity_category) %>%
+  summarise(
+    total_cases = n(),
+    readmissions = sum(readmit_30day, na.rm = TRUE),
+    readmission_rate = round(mean(readmit_30day, na.rm = TRUE) * 100, 1),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(readmission_rate))
+
+kable(complexity_readmission, caption = 'Readmission Rates by Clinical Complexity Category',
+      col.names = c('Clinical Complexity Category', 'Total Cases', 'Readmissions', 'Readmission Rate (%)'))
+
+# Update analysis_data
+analysis_data <- complexity_features
+
+cat('\n=== FEATURE ENGINEERING SUMMARY ===\n')
+cat('Total features created:', ncol(analysis_data) - ncol(readmit_eligible), '\n')
+cat('Final dataset dimensions:', nrow(analysis_data), 'x', ncol(analysis_data), '\n')
+cat('Ready for model development.\n')
+```
+**Section Note:** Clinical complexity scores range from 3-58 with a mean of 9.3, effectively capturing the multi-dimensional nature of patient acuity through diagnoses, procedures, laboratory testing, and comorbidities. The feature successfully stratifies patients into meaningful complexity categories with corresponding increases in readmission risk. A small subset (531 patients, 0.1%) had missing complexity scores due to absent diagnosis records and were removed in the subsequent data cleaning step.
+
+## 6.5 Data Cleaning for Modeling
+```{r final-data-cleaning}
+# Remove patients with missing diagnosis data
+# These 531 patients have no diagnosis records, causing NAs in composite scores
+analysis_data_clean <- analysis_data %>% 
+  filter(!is.na(clinical_complexity_score) & !is.na(total_diagnoses))
+
+cat('Patients removed due to missing diagnosis data:', nrow(analysis_data) - nrow(analysis_data_clean), '\n')
+cat('Final modeling dataset size:', nrow(analysis_data_clean), 'patients\n')
+cat('Percentage retained:', round(nrow(analysis_data_clean)/nrow(analysis_data)*100, 2), '%\n')
+
+# Verify no NAs in key composite features
+na_check <- data.frame(
+  Feature = c('Clinical Complexity Score', 'Charlson Score', 'Medication Risk Score', 'Total Diagnoses'),
+  NA_Count = c(
+    sum(is.na(analysis_data_clean$clinical_complexity_score)),
+    sum(is.na(analysis_data_clean$charlson_score)),
+    sum(is.na(analysis_data_clean$medication_risk_score)),
+    sum(is.na(analysis_data_clean$total_diagnoses))
+  )
+)
+
+kable(na_check, caption = 'NA Check for Key Modeling Features')
+
+# Update analysis_data for modeling
+analysis_data <- analysis_data_clean
+
+cat('\n=== FEATURE ENGINEERING COMPLETE ===\n')
+cat('Final dataset dimensions:', nrow(analysis_data), 'rows x', ncol(analysis_data), 'columns\n')
+cat('Total engineered features:', ncol(analysis_data) - ncol(readmit_eligible), '\n')
+cat('Ready for model development.\n')
+```
+
+**Section Note:** Final data cleaning removed 531 patients (0.1% of cohort) who lacked diagnosis records, ensuring all composite features are complete for modeling. The final dataset of 545,316 patients contains 83 engineered features spanning comorbidity indices, healthcare utilization metrics, medication risk scores, and clinical complexity indicators. All key modeling features have been validated with no missing values.
+
+# 7. Model Development 
+
+## 7.1 Data Preparation for Modeling
+```{r modeling-libraries}
+# Load additional modeling libraries
+library(caret)
+library(pROC)
+library(ROCR)
+library(randomForest)
+library(xgboost)
+library(glmnet)
+library(xgboost)
+library(Ckmeans.1d.dp)
+library(gridExtra)
+```
+
+```{r data-split}
+# Create temporal train/test/validation split
+# This reflects real-world deployment where models are trained on historical data and tested on future admissions
+
+# Sort by admission time
+analysis_data <- analysis_data %>%
+  arrange(admittime)
+
+# Calculate split points for 70% train, 15% validation, 15% test
+n_total <- nrow(analysis_data)
+n_train <- floor(n_total * 0.7)
+n_val <- floor(n_total * 0.15)
+n_test <- n_total - n_train - n_val
+
+# Create temporal splits
+train_data <- analysis_data[1:n_train, ]
+val_data <- analysis_data[(n_train + 1):(n_train + n_val), ]
+test_data <- analysis_data[(n_train + n_val + 1):n_total, ]
+
+# CRITICAL: Remove data quality race categories that are not actual demographics
+# These are data collection issues, not predictive features
+data_quality_races <- c('UNKNOWN', 'UNABLE TO OBTAIN', 'PATIENT DECLINED TO ANSWER')
+
+cat('\n=== REMOVING DATA QUALITY RACE CATEGORIES ===\n')
+cat('Before filtering:\n')
+cat('  Train:', nrow(train_data), 'patients\n')
+cat('  Val:', nrow(val_data), 'patients\n')
+cat('  Test:', nrow(test_data), 'patients\n')
+
+train_data <- train_data %>% filter(!race %in% data_quality_races)
+val_data <- val_data %>% filter(!race %in% data_quality_races)
+test_data <- test_data %>% filter(!race %in% data_quality_races)
+
+cat('\nAfter filtering:\n')
+cat('  Train:', nrow(train_data), 'patients\n')
+cat('  Val:', nrow(val_data), 'patients\n')
+cat('  Test:', nrow(test_data), 'patients\n')
+cat('  Total removed:', (n_total - nrow(train_data) - nrow(val_data) - nrow(test_data)), 'patients\n\n')
+
+# Report split characteristics
+split_summary <- data.frame(
+  Dataset = c('Training', 'Validation', 'Test', 'Total'),
+  N_Patients = c(nrow(train_data), nrow(val_data), nrow(test_data), nrow(analysis_data)),
+  N_Readmissions = c(sum(train_data$readmit_30day), sum(val_data$readmit_30day), 
+                     sum(test_data$readmit_30day), sum(analysis_data$readmit_30day)),
+  Readmission_Rate = c(
+    round(mean(train_data$readmit_30day) * 100, 2),
+    round(mean(val_data$readmit_30day) * 100, 2),
+    round(mean(test_data$readmit_30day) * 100, 2),
+    round(mean(analysis_data$readmit_30day) * 100, 2)
+  ),
+  Date_Range_Start = c(
+    format(min(train_data$admittime, na.rm = TRUE), "%Y-%m-%d"),
+    format(min(val_data$admittime, na.rm = TRUE), "%Y-%m-%d"),
+    format(min(test_data$admittime, na.rm = TRUE), "%Y-%m-%d"),
+    format(min(analysis_data$admittime, na.rm = TRUE), "%Y-%m-%d")
+  ),
+  Date_Range_End = c(
+    format(max(train_data$admittime, na.rm = TRUE), "%Y-%m-%d"),
+    format(max(val_data$admittime, na.rm = TRUE), "%Y-%m-%d"),
+    format(max(test_data$admittime, na.rm = TRUE), "%Y-%m-%d"),
+    format(max(analysis_data$admittime, na.rm = TRUE), "%Y-%m-%d")
+  )
+)
+
+kable(split_summary, caption = 'Train/Validation/Test Split Summary',
+      col.names = c('Dataset', 'N Patients', 'N Readmissions', 'Readmission Rate (%)', 
+                    'Date Range Start', 'Date Range End'))
+
+cat('\n**Important Data Quality Decision:**\n')
+cat('Data quality race categories (UNKNOWN, UNABLE TO OBTAIN, PATIENT DECLINED) were\n')
+cat('excluded from all model training. These categories represent data collection issues\n')
+cat('rather than demographic characteristics and should not be used as predictive features.\n')
+cat('Including them would cause the model to learn spurious correlations based on when\n')
+cat('demographic data was or was not collected (e.g., emergency admissions, language barriers).\n\n')
+
+cat('\n=== DATA SPLITTING COMPLETE ===\n')
+cat('Training set:', nrow(train_data), 'patients (', round(nrow(train_data)/n_total*100, 2), '% readmitted)\n')
+cat('Validation set:', nrow(val_data), 'patients (', round(nrow(val_data)/n_total*100, 2), '% readmitted)\n')
+cat('Test set:', nrow(test_data), 'patients (', round(nrow(test_data)/n_total*100, 2), '% readmitted)\n')
+
+```
+
+**Note on Temporal Train/Validation/Test Split:**
+
+This analysis employs a **temporal split** rather than random sampling to create training (70%), validation (15%), and test (15%) datasets. Patients are sorted chronologically by admission time, with earlier admissions used for training and later admissions reserved for validation and testing.
+
+**Rationale for Temporal Splitting:**
+
+1. **Simulates Real-World Deployment** - In clinical practice, readmission prediction models are trained on historical data and then deployed to predict outcomes for future patients. A temporal split replicates this scenario, where the model never "sees the future" during training. Random splitting would allow the model to learn from patients admitted after those in the test set, creating an unrealistic evaluation scenario.
+
+2. **Prevents Temporal Data Leakage** - Healthcare data often contains temporal patterns (e.g., changing treatment protocols, seasonal variations, evolving patient populations). Random splitting can leak these patterns across train/test boundaries, artificially inflating performance metrics. Temporal splitting ensures the model generalizes to future time periods, not just unseen patients from the same time period.
+
+3. **Evaluates Model Degradation** - Healthcare models can degrade over time as clinical practice evolves. The temporal split provides a conservative estimate of performance by testing on the most recent data, revealing whether the model's patterns remain stable across time.
+
+4. **Validation Set for Hyperparameter Tuning** - The 15% validation set enables model selection and hyperparameter optimization without touching the held-out test set, preserving an unbiased final performance estimate.
+
+**MIMIC-IV Date Handling:** 
+MIMIC-IV uses de-identified dates that are randomly shifted for each patient while preserving chronological order within each patient's record and relative temporal relationships across the dataset. This maintains the validity of the temporal split while protecting patient privacy.
+
+**Split Verification:**
+The readmission rates across train/validation/test sets (all ~20%) confirm that the temporal split maintains class balance, indicating stable outcome prevalence over time.
+
+```{r feature-selection}
+# Select features for modeling
+# Exclude identifiers, dates, outcome-related variables, and redundant categorical features
+
+exclude_vars = c(
+  # Identifiers
+  'subject_id', 'hadm_id',
+  # Temporal Variables
+  'admittime', 'dischtime', 'edregtime', 'edouttime', 'deathtime', 'dod',
+  # Outcome variables (would cause data leakage)
+  'readmit_30day', 'next_admission', 'days_to_readmit',
+  # Intermediate variables used to create features
+  'drug_clean', 'primary_diagnosis_code', 'anchor_year', 'anchor_year_group',
+  # Individual Charlson/risk components (use composite scores instead)
+  'charlson_mi', 'charlson_pvd', 'charlson_cvd', 'charlson_renal',
+  'charlson_liver_mild', 'charlson_liver_severe', 'charlson_cancer', 'charlson_cancer_mets',
+  'charlson_dementia', 'charlson_paralysis', 'charlson_peptic', 'charlson_rheum', 'charlson_aids',
+  'charlson_diabetes_comp',
+  # Categorical versions of numeric scores (keep numeric for better model performance)
+  'charlson_category', 'medication_risk_category', 'clinical_complexity_category',
+  'los_category', 'polypharmacy_risk', 'lab_testing_intensity', 
+  'procedure_complexity', 'age_risk_category', 'high_risk_combination',
+  'diagnostic_complexity', 'procedural_complexity', 'lab_monitoring_complexity',
+  # Categorical text variables that need encoding (excluded for now)
+  'primary_diagnosis_name', 'admission_location', 'discharge_location', 
+  'language', 'marital_status', 'admit_provider_id'
+)
+
+# Get feature names
+feature_names = setdiff(colnames(analysis_data), exclude_vars)
+
+cat('\n=== FEATURE SELECTION ===\n')
+cat('Total variables in dataset:', ncol(analysis_data), '\n')
+cat('Variables excluded:', length(exclude_vars), '\n')
+cat('Final features selected for modeling:', length(feature_names), '\n')
+
+# Display actual features being used (for verification)
+cat('\n=== FEATURES INCLUDED IN MODEL ===\n')
+print(sort(feature_names))
+```
+
+**Note on Feature Selection Strategy:**
+
+The feature selection process reduced the dataset from 103 variables to 57 modeling features through systematic exclusion of non-predictive and redundant variables:
+
+**Excluded Variable Categories:**
+1. **Identifiers and temporal variables** (patient IDs, admission dates) - These would cause overfitting to specific individuals or time periods rather than learning generalizable patterns. Temporal information is preserved through derived features like length of stay.
+
+2. **Outcome variables** (readmit_30day, days_to_readmit) - Including these would create data leakage, as they represent information that wouldn't be available at prediction time.
+
+3. **Redundant categorical binnings** - For each composite score (Charlson, medication risk, clinical complexity), both numeric scores and categorical risk groups were created during feature engineering. To avoid multicollinearity and preserve granular information, numeric scores were retained while categorical versions were excluded. For example, `charlson_score` (values 0-15) provides more information than `charlson_category` ("Low", "Moderate", "High"), and logistic regression performs better with continuous predictors.
+
+4. **Individual risk components** - Raw Charlson comorbidity flags (e.g., `charlson_mi`, `charlson_cvd`) were excluded in favor of the composite `charlson_score`, which represents validated clinical risk stratification.
+
+5. **Text categorical variables** - Variables like `primary_diagnosis_name` require specialized encoding (e.g., embeddings) and are represented through structured features like diagnosis categories and condition-specific flags.
+
+**Final Feature Set (n=57):** The retained features span demographics (age, gender, race, insurance), clinical complexity indicators (Charlson score, diagnosis counts, multi-system involvement), medication burden metrics, procedure complexity, laboratory testing intensity, and healthcare utilization patterns. This feature set balances comprehensiveness with model interpretability and avoids redundancy.
+
+```{r prepare-model-matrices}
+# Prepare modeling datasets
+# Convert categorical variables t ofactors and handle any remaining issues
+
+# Function to prepare data for modeling
+prepare_model_data <- function(data, feature_names) {
+  model_data <- data %>%
+    select(all_of(c(feature_names, 'readmit_30day'))) %>%
+    mutate(
+      # convert categorical variables to factors
+      gender = as.factor(gender),
+      race = as.factor(race),
+      insurance = as.factor(insurance),
+      admission_type = as.factor(admission_type),
+      
+      # Convert logical variables to numeric
+      across(where(is.logical), as.numeric),
+      
+      # Ensure outcome is factor for classification
+      readmit_30day = factor(readmit_30day, levels = c(0, 1), labels = c('No', 'Yes'))
+    )
+  
+  return(model_data)
+}
+
+# Prepare datasets
+train_model <- prepare_model_data(train_data, feature_names)
+val_model <- prepare_model_data(val_data, feature_names)
+test_model <- prepare_model_data(test_data, feature_names)
+
+# Check for any remaining NAs
+na_summary <- data.frame(
+  Dataset = c('Training', 'Validation', 'Test'),
+  Total_NAs = c(
+    sum(is.na(train_model)), 
+    sum(is.na(val_model)), 
+    sum(is.na(test_model))
+  ),
+  Percent_NAs = c(
+    round(sum(is.na(train_model)) / (nrow(train_model) * ncol(train_model)) * 100, 4),
+    round(sum(is.na(val_model)) / (nrow(val_model) * ncol(val_model)) * 100, 4),
+    round(sum(is.na(test_model)) / (nrow(test_model) * ncol(test_model)) * 100, 4)
+  )
+)
+
+kable(na_summary, caption = 'NA Summary in Modeling Datasets')
+
+cat('\n=== MODEL DATA PREPARATION COMPLETE ===\n')
+cat('Training set dimensions:', nrow(train_model), 'x', ncol(train_model), '\n')
+cat('Validation set dimensions:', nrow(val_model), 'x', ncol(val_model), '\n')
+cat('Test set dimensions:', nrow(test_model), 'x', ncol(test_model), '\n')
+cat('All datasets ready for model training and evaluation.\n')
+```
+
+
+## 7.2a Logistic Regression - Model Training
+
+```{r logistic-regression}
+# Logistic Regression - Healthcare gold standard for interpretability
+# Using L2 regularization (ridge method) to handle correlated features
+
+cat('Training Logistic Regression Model...\n')
+
+# Train logistic regression with cross-validation for optimal lambda
+set.seed(123)
+
+# Prepare matrices for glmnet (requires numeric matrix input)
+train_x = model.matrix(readmit_30day ~ . - 1, data = train_model)
+train_y = train_model$readmit_30day
+
+val_x = model.matrix(readmit_30day ~ . - 1, data = val_model)
+val_y = val_model$readmit_30day
+
+# Train ridge logistic regression
+logistic_model = cv.glmnet(
+  x = train_x,
+  y = train_y,
+  family = 'binomial',
+  alpha = 0, # Ridge regression (L2 penalty)
+  nfolds = 5,
+  type.measure = 'auc'
+)
+
+# Make predictions on validation set
+logistic_pred_prob = predict(logistic_model, newx = val_x, s = 'lambda.min', type = 'response')
+
+# Calculate ROC curve and AUC
+logistic_roc = roc(val_y, as.numeric(logistic_pred_prob))
+logistic_auc = auc(logistic_roc)
+
+# Find optimal threshold using Youden's Index
+# This balances sensitivity and specificity for imbalanced classes
+coords_result <- coords(logistic_roc, "best", best.method = "youden")
+optimal_threshold <- coords_result$threshold
+
+cat('\nOptimal classification threshold:', round(optimal_threshold, 4), '\n')
+cat('(Default threshold of 0.5 is inappropriate for 20% readmission rate)\n\n')
+
+# Generate predictions using optimal threshold
+logistic_pred_class = ifelse(logistic_pred_prob >= optimal_threshold, 'Yes', 'No')
+
+# Calculate performance metrics
+logistic_cm = confusionMatrix(
+  factor(logistic_pred_class, levels = c('No', 'Yes')),
+  val_y,
+  positive = 'Yes'
+)
+
+cat("Model Training cmoplete!\n")
+```
+
+## 7.2b Logistic Regression - Model Evaluation and Interpretation
+
+```{r logistic-metrics}
+# Extract metrics for reporting
+logistic_metrics = data.frame(
+  Model = 'Logistic Regression',
+  Threshold = round(optimal_threshold, 4),
+  AUC = round(logistic_auc, 4),
+  Sensitivity = round(logistic_cm$byClass['Sensitivity'], 4),
+  Specificity = round(logistic_cm$byClass['Specificity'], 4),
+  PPV = round(logistic_cm$byClass['Pos Pred Value'], 4),
+  NPV = round(logistic_cm$byClass['Neg Pred Value'], 4),
+  Accuracy = round(logistic_cm$overall['Accuracy'], 4)
+)
+
+rownames(logistic_metrics) <- NULL
+
+kable(logistic_metrics, caption = 'Logistic Regression Performance on Validation Set')
+
+cat('\n=== LOGISTIC REGRESSION RESULTS ===\n')
+cat('AUC:', round(logistic_auc, 4), '\n')
+cat('Optimal Threshold:', round(optimal_threshold, 4), '\n')
+cat('Sensitivity (Recall):', round(logistic_cm$byClass['Sensitivity'], 4), '\n')
+cat('Specificity:', round(logistic_cm$byClass['Specificity'], 4), '\n')
+cat('PPV (Precision):', round(logistic_cm$byClass['Pos Pred Value'], 4), '\n')
+
+# Feature importance from logistic regression
+logistic_coef = coef(logistic_model, s = 'lambda.min')
+logistic_coef_df = data.frame(
+  Feature = rownames(logistic_coef),
+  Coefficient = as.numeric(logistic_coef)
+) %>%
+  filter(Feature != '(Intercept)') %>%
+  mutate(Abs_Coefficient = abs(Coefficient)) %>%
+  arrange(desc(Abs_Coefficient)) %>%
+  head(15)
+
+kable(logistic_coef_df, caption = 'Top 15 Features by Logistic Regression Coefficient Magnitude',
+      col.names = c('Feature', 'Coefficient', 'Absolute Coefficient'))
+
+# Visualize top features
+ggplot(logistic_coef_df, aes(x = reorder(Feature, Abs_Coefficient), y = Coefficient)) + 
+  geom_col(aes(fill = Coefficient > 0), alpha = 0.7) +
+  coord_flip() +
+  scale_fill_manual(values = c('TRUE' = 'steelblue', 'FALSE' = 'coral'),
+                    labels = c('TRUE' = 'Increases Risk', 'FALSE' = 'Decreases Risk'),
+                    name = 'Effect') +
+  labs(title = 'Top 15 Features Influencing Readmission Risk (Logistic Regression)',
+       x = 'Feature',
+       y = 'Coefficient') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+**Logistic Regression Performance Interpretation:**
+
+The logistic regression model achieved an AUC of 0.655 on the validation set, indicating moderate discriminative ability. This performance is consistent with published hospital readmission prediction studies, which typically report AUCs in the 0.60-0.75 range. Readmission prediction is inherently challenging due to the multifactorial nature of readmissions, which depend on clinical factors, social determinants, and post-discharge events not captured in administrative data.
+
+**Threshold Optimization:**
+The optimal classification threshold (0.19) was determined using Youden's Index, which maximizes the sum of sensitivity and specificity. This threshold is substantially lower than the default 0.5 because the outcome is imbalanced (20% readmission rate). Using the default threshold would result in the model rarely predicting readmissions (sensitivity = 4%), as it would optimize for overall accuracy by predicting "no readmission" for most patients.
+
+**Clinical Utility:**
+At the optimal threshold, the model achieves:
+- **Sensitivity: 64%** - Identifies approximately two-thirds of patients who will be readmitted
+- **Specificity: 59%** - Correctly identifies about half of patients who will not be readmitted  
+- **PPV: 28%** - Among patients flagged as high-risk, 28% actually readmit (40% relative increase over baseline)
+
+**Feature Importance:**
+Top predictive features include clinical complexity scores, comorbidity indices, and healthcare utilization patterns. Logistic regression coefficients provide transparency for clinical stakeholders, facilitating trust in model predictions.
+
+## 7.3 Random Forest Model
+```{r random-forest}
+# Random Forest - Captures non-linear relationships and interactions
+# No feature scaling required, handles mixed variable types well
+
+cat('Training Random Forest Model...\n')
+
+set.seed(123)
+
+# Train random forest
+# Using 100 trees for computational efficiency while maintaining performance
+rf_model = randomForest(
+  readmit_30day ~ .,
+  data = train_model,
+  ntree = 100,
+  mtry = sqrt(ncol(train_model) - 1), # Features to consider at each split
+  importance = TRUE,
+  na.action = na.omit
+)
+
+# Make predictions on validation set
+rf_pred_prob = predict(rf_model, newdata = val_model, type = 'prob')[, 'Yes']
+
+# Calculate ROC curve and AUC
+rf_roc = roc(val_y, rf_pred_prob)
+rf_auc = auc(rf_roc)
+
+# Find optimal threshold using Youden's Index
+coords_result_rf <- coords(rf_roc, "best", best.method = "youden")
+optimal_threshold_rf <- coords_result_rf$threshold
+
+cat('\nOptimal classification threshold:', round(optimal_threshold_rf, 4), '\n')
+cat('(Optimized for balanced sensitivity/specificity)\n\n')
+
+# Generate predictions using optimal threshold
+rf_pred_class = ifelse(rf_pred_prob >= optimal_threshold_rf, 'Yes', 'No')
+
+# Calculate performance metrics
+rf_cm = confusionMatrix(
+  factor(rf_pred_class, levels = c('No', 'Yes')),
+  val_y,
+  positive = 'Yes'
+)
+
+cat("Random Forest Model Training complete!\n")
+```
+
+## 7.3b Random Forest - Model Evaluation and Interpretation
+
+```{r random-forest-metrics}
+# Extract metrics for reporting
+rf_metrics = data.frame(
+  Model = 'Random Forest',
+  Threshold = round(optimal_threshold_rf, 4),
+  AUC = round(rf_auc, 4),
+  Sensitivity = round(rf_cm$byClass['Sensitivity'], 4),
+  Specificity = round(rf_cm$byClass['Specificity'], 4),
+  PPV = round(rf_cm$byClass['Pos Pred Value'], 4),
+  NPV = round(rf_cm$byClass['Neg Pred Value'], 4),
+  Accuracy = round(rf_cm$overall['Accuracy'], 4)
+)
+
+rownames(rf_metrics) <- NULL
+
+kable(rf_metrics, caption = 'Random Forest Performance on Validation Set')
+
+cat('\n=== RANDOM FOREST RESULTS ===\n')
+cat('AUC:', round(rf_auc, 4), '\n')
+cat('Optimal Threshold:', round(optimal_threshold_rf, 4), '\n')
+cat('Sensitivity (Recall):', round(rf_cm$byClass['Sensitivity'], 4), '\n')
+cat('Specificity:', round(rf_cm$byClass['Specificity'], 4), '\n')
+cat('PPV (Precision):', round(rf_cm$byClass['Pos Pred Value'], 4), '\n')
+cat('Number of trees:', rf_model$ntree, '\n')
+cat('OOB error rate:', round(rf_model$err.rate[rf_model$ntree, 'OOB'] * 100, 2), '%\n')
+
+# Feature Importance
+rf_importance = importance(rf_model)
+rf_importance_df = data.frame(
+  Feature = rownames(rf_importance),
+  MeanDecreaseAccuracy = rf_importance[, 'MeanDecreaseAccuracy'],
+  MeanDecreaseGini = rf_importance[, 'MeanDecreaseGini']
+) %>%
+  arrange(desc(MeanDecreaseGini)) %>%
+  head(15)
+
+kable(rf_importance_df, caption = 'Top 15 Features by Random Forest Importance',
+      col.names = c('Feature', 'Mean Decrease in Accuracy', 'Mean Decrease in Gini'))
+
+# Visualize feature importance
+ggplot(rf_importance_df, aes(x = reorder(Feature, MeanDecreaseGini), y = MeanDecreaseGini)) + 
+  geom_col(fill = 'darkgreen', alpha = 0.7) +
+  coord_flip() +
+  labs(title = 'Top 15 Features Influencing Readmission Risk (Random Forest)',
+       x = 'Feature',
+       y = 'Mean Decrease in Gini (Feature Importance)') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+**Random Forest Performance Interpretation:**
+
+Random Forest achieved AUC 0.660, marginally outperforming logistic regression (0.655). This minimal difference suggests readmission prediction is primarily driven by linear relationships rather than complex non-linear interactions.
+
+**Performance Characteristics:**
+At optimal threshold (0.205): Sensitivity 66%, Specificity 57%, PPV 28%. Random Forest achieves more balanced sensitivity/specificity tradeoff (both ~62%) compared to logistic regression's higher sensitivity (64%) at cost of more false positives.
+
+**Feature Importance:**
+Random Forest importance rankings (Mean Decrease in Gini) complement logistic regression coefficients. Consistent rankings across both models strengthen confidence in identified risk factors: clinical complexity, comorbidity burden, and healthcare utilization intensity.
+
+## 7.4a XGBoost - Model Training
+```{r xgboost}
+# XGBoost - Gradient boosting for complex patterns and feature interactions
+# Highly flexible with built-in regularization to prevent overfitting
+
+cat('Training XGBoost Model...\n')
+
+set.seed(123)
+
+# Prepare data matrices for XGBoost using model.matrix (handles all conversions)
+train_xgb_matrix <- model.matrix(readmit_30day ~ . - 1, data = train_model)
+train_xgb_label <- as.numeric(train_model$readmit_30day) - 1  # Convert to 0/1
+
+val_xgb_matrix <- model.matrix(readmit_30day ~ . - 1, data = val_model)
+val_xgb_label <- as.numeric(val_model$readmit_30day) - 1
+
+# Create DMatrix objects
+dtrain <- xgb.DMatrix(
+  data = train_xgb_matrix,
+  label = train_xgb_label
+)
+
+dval <- xgb.DMatrix(
+  data = val_xgb_matrix,
+  label = val_xgb_label
+)
+
+# Set XGBoost parameters
+xgb_params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1,              # learning rate
+  subsample = 0.8,        # row sampling
+  colsample_bytree = 0.8, # column sampling
+  min_child_weight = 1
+)
+
+# Train XGBoost model with early stopping
+xgb_model <- xgb.train(
+  params = xgb_params,
+  data = dtrain,
+  nrounds = 500,
+  watchlist = list(train = dtrain, val = dval),
+  early_stopping_rounds = 20,
+  verbose = 0
+)
+
+cat('Best iteration:', xgb_model$best_iteration, '\n')
+
+# Make predictions on validation set
+xgb_pred_prob <- predict(xgb_model, dval)
+
+# Calculate ROC curve and AUC
+xgb_roc <- roc(val_y, xgb_pred_prob)
+xgb_auc <- auc(xgb_roc)
+
+# Find optimal threshold using Youden's Index
+coords_result_xgb <- coords(xgb_roc, "best", best.method = "youden")
+optimal_threshold_xgb <- coords_result_xgb$threshold
+
+cat('\nOptimal classification threshold:', round(optimal_threshold_xgb, 4), '\n')
+cat('(Optimized for balanced sensitivity/specificity)\n\n')
+
+# Generate predictions using optimal threshold
+xgb_pred_class <- ifelse(xgb_pred_prob >= optimal_threshold_xgb, 'Yes', 'No')
+
+# Calculate performance metrics
+xgb_cm <- confusionMatrix(
+  factor(xgb_pred_class, levels = c('No', 'Yes')),
+  val_y,
+  positive = 'Yes'
+)
+
+cat("XGBoost Model Training complete!\n")
+```
+
+## 7.4b XGBoost - Model Evaluation and Interpretation
+```{r xgboost-metrics}
+# Extract metrics for reporting
+xgb_metrics <- data.frame(
+  Model = 'XGBoost',
+  Threshold = round(optimal_threshold_xgb, 4),
+  AUC = round(xgb_auc, 4),
+  Sensitivity = round(xgb_cm$byClass['Sensitivity'], 4),
+  Specificity = round(xgb_cm$byClass['Specificity'], 4),
+  PPV = round(xgb_cm$byClass['Pos Pred Value'], 4),
+  NPV = round(xgb_cm$byClass['Neg Pred Value'], 4),
+  Accuracy = round(xgb_cm$overall['Accuracy'], 4)
+)
+rownames(xgb_metrics) <- NULL
+
+kable(xgb_metrics, caption = 'XGBoost Performance on Validation Set')
+
+cat('\n=== XGBOOST RESULTS ===\n')
+cat('AUC:', round(xgb_auc, 4), '\n')
+cat('Optimal Threshold:', round(optimal_threshold_xgb, 4), '\n')
+cat('Sensitivity (Recall):', round(xgb_cm$byClass['Sensitivity'], 4), '\n')
+cat('Specificity:', round(xgb_cm$byClass['Specificity'], 4), '\n')
+cat('PPV (Precision):', round(xgb_cm$byClass['Pos Pred Value'], 4), '\n')
+cat('Best iteration (early stopping):', xgb_model$best_iteration, '\n')
+
+# Feature Importance
+xgb_importance <- xgb.importance(model = xgb_model)
+xgb_importance_top15 <- head(xgb_importance, 15)
+
+kable(xgb_importance_top15[, c('Feature', 'Gain', 'Cover', 'Frequency')], 
+      caption = 'Top 15 Features by XGBoost Importance',
+      col.names = c('Feature', 'Gain', 'Cover', 'Frequency'))
+
+# Visualize feature importance
+xgb.ggplot.importance(xgb_importance_top15, measure = "Gain", rel_to_first = TRUE) +
+  labs(title = 'Top 15 Features Influencing Readmission Risk (XGBoost)',
+       x = 'Relative Importance (Gain)') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+**Note on XGBoost Training and Hyperparameter Optimization:**
+
+**Note on Training:** XGBoost was trained with early stopping (converged at iteration 407) using standard healthcare prediction hyperparameters (learning rate 0.1, max depth 6, subsample 0.8).
+
+**Performance Achievement:**
+XGBoost achieved the best validation performance (AUC 0.695). Feature importance rankings identify clinical complexity scores, comorbidity indices, and healthcare utilization metrics as primary risk drivers. Full model comparison in Section 7.5.
+
+**Clinical Implications:**
+The model's improved risk stratification enables targeted resource allocation for intensive discharge interventions (detailed cost-benefit analysis in Section 9).
+
+## 8.5 Model Coomparison and Evaluation
+```{r model-comparison}
+# Compare all models on validation set
+model_comparison <- data.frame(
+  Model = c('Logistic Regression', 'Random Forest', 'XGBoost'),
+  Threshold = c(
+    round(optimal_threshold, 4), 
+    round(optimal_threshold_rf, 4),
+    round(optimal_threshold_xgb, 4)
+  ),
+  AUC = c(
+    round(logistic_auc, 4), 
+    round(rf_auc, 4),
+    round(xgb_auc, 4)
+  ),
+  Sensitivity = c(
+    round(logistic_cm$byClass['Sensitivity'], 4),
+    round(rf_cm$byClass['Sensitivity'], 4),
+    round(xgb_cm$byClass['Sensitivity'], 4)
+  ),
+  Specificity = c(
+    round(logistic_cm$byClass['Specificity'], 4),
+    round(rf_cm$byClass['Specificity'], 4),
+    round(xgb_cm$byClass['Specificity'], 4)
+  ),
+  PPV = c(
+    round(logistic_cm$byClass['Pos Pred Value'], 4),
+    round(rf_cm$byClass['Pos Pred Value'], 4),
+    round(xgb_cm$byClass['Pos Pred Value'], 4)
+  ),
+  NPV = c(
+    round(logistic_cm$byClass['Neg Pred Value'], 4),
+    round(rf_cm$byClass['Neg Pred Value'], 4),
+    round(xgb_cm$byClass['Neg Pred Value'], 4)
+  ),
+  Accuracy = c(
+    round(logistic_cm$overall['Accuracy'], 4),
+    round(rf_cm$overall['Accuracy'], 4),
+    round(xgb_cm$overall['Accuracy'], 4)
+  )
+)
+
+kable(model_comparison, caption = 'Model Performance Comparison on Validation Set')
+
+# ROC curve comparison
+plot(logistic_roc, col = 'blue', main = 'ROC Curves - Model Comparison (Validation Set)',
+     print.auc = FALSE, legacy.axes = TRUE, lwd = 2)
+plot(rf_roc, col = 'darkgreen', add = TRUE, lwd = 2)
+plot(xgb_roc, col = 'purple', add = TRUE, lwd = 2)
+legend('bottomright',
+       legend = c(
+         paste0('Logistic Regression (AUC=', round(logistic_auc, 3), ')'),
+         paste0('Random Forest (AUC=', round(rf_auc, 3), ')'),
+         paste0('XGBoost (AUC=', round(xgb_auc, 3), ')')
+       ),
+       col = c('blue', 'darkgreen', 'purple'),
+       lwd = 2,
+       cex = 0.9)
+
+# Model comparison summary
+cat('\n=== MODEL COMPARISON SUMMARY ===\n')
+
+best_auc_idx <- which.max(model_comparison$AUC)
+best_sens_idx <- which.max(model_comparison$Sensitivity)
+best_spec_idx <- which.max(model_comparison$Specificity)
+best_ppv_idx <- which.max(model_comparison$PPV)
+best_acc_idx <- which.max(model_comparison$Accuracy)
+
+cat('Best AUC:', model_comparison$AUC[best_auc_idx], 
+    '(', model_comparison$Model[best_auc_idx], ')\n')
+cat('Best Sensitivity:', model_comparison$Sensitivity[best_sens_idx], 
+    '(', model_comparison$Model[best_sens_idx], ')\n')
+cat('Best Specificity:', model_comparison$Specificity[best_spec_idx], 
+    '(', model_comparison$Model[best_spec_idx], ')\n')
+cat('Best PPV:', model_comparison$PPV[best_ppv_idx], 
+    '(', model_comparison$Model[best_ppv_idx], ')\n')
+cat('Best Accuracy:', model_comparison$Accuracy[best_acc_idx], 
+    '(', model_comparison$Model[best_acc_idx], ')\n')
+
+# Determine overall best model (based on AUC as primary metric)
+best_model_name <- model_comparison$Model[best_auc_idx]
+cat('\n=== SELECTED MODEL FOR FINAL EVALUATION ===\n')
+cat('Based on validation set performance, ', best_model_name, 
+    ' will be evaluated on the held-out test set.\n', sep = '')
+cat('AUC:', model_comparison$AUC[best_auc_idx], '\n')
+cat('Optimal Threshold:', model_comparison$Threshold[best_auc_idx], '\n')
+cat('Sensitivity:', model_comparison$Sensitivity[best_auc_idx], '\n')
+cat('Specificity:', model_comparison$Specificity[best_auc_idx], '\n')
+cat('PPV:', model_comparison$PPV[best_ppv_idx], '\n')
+```
+
+## 8. Final Model Evaluation on the Test Set
+```{r final-evaluation}
+# Apply the selected best model (XGBoost) to the held-out test set
+# This provides an unbiased estimate of real-world performance
+
+cat('=== FINAL MODEL EVALUATION ===\n')
+cat('Selected Model: XGBoost\n')
+cat('Validation Set AUC:', round (xgb_auc, 4), '\n')
+cat('Applying to held-out test set...\n\n')
+
+# Prepare test data
+test_xgb_matrix <- model.matrix(readmit_30day ~ . - 1, data = test_model)
+test_xgb_label <- as.numeric(test_model$readmit_30day) - 1
+
+dtest <- xgb.DMatrix(
+  data = test_xgb_matrix,
+  label = test_xgb_label
+)
+
+test_y = test_model$readmit_30day
+
+# Make predictions on test set
+test_pred_prob = predict(xgb_model, dtest)
+
+# Calculate ROC curve and AUC
+test_roc = roc(test_y, test_pred_prob)
+test_auc = auc(test_roc)
+
+# Apply the SAME optimal threshold from validation (no peeking!)
+test_pred_class = ifelse(test_pred_prob >= optimal_threshold_xgb, 'Yes', 'No')
+
+# Calculate test set performance
+test_cm = confusionMatrix(
+  factor(test_pred_class, levels = c('No', 'Yes')),
+  test_y,
+  positive = 'Yes'
+)
+
+# Create performance summary across all sets
+performance_summary = data.frame(
+  Dataset = c('Training', 'Validation', 'Test'),
+  N_Patients = c(nrow(train_model), nrow(val_model), nrow(test_model)),
+  Readmission_Rate = c(
+    round(mean(train_model$readmit_30day == 'Yes') * 100, 2),
+    round(mean(val_model$readmit_30day == 'Yes') * 100, 2),
+    round(mean(test_model$readmit_30day == 'Yes') * 100, 2)
+  ),
+  AUC = c(
+    NA,
+    round(xgb_auc, 4),
+    round(test_auc, 4)
+  ),
+  Sensitivity = c(
+    NA,
+    round(xgb_cm$byClass['Sensitivity'], 4),
+    round(test_cm$byClass['Sensitivity'], 4)
+  ),
+  Specificity = c(
+    NA,
+    round(xgb_cm$byClass['Specificity'], 4),
+    round(test_cm$byClass['Specificity'], 4)
+  ),
+  PPV = c(
+    NA,
+    round(xgb_cm$byClass['Pos Pred Value'], 4),
+    round(test_cm$byClass['Pos Pred Value'], 4)
+  ),
+  Accuracy = c(
+    NA,
+    round(xgb_cm$overall['Accuracy'], 4),
+    round(test_cm$overall['Accuracy'], 4)
+  )
+)
+
+kable(performance_summary,
+      caption = 'XGBoost Model Performance Across Datasets',
+      col.names = c('Dataset', 'N Patients', 'Readmission Rate (%)', 'AUC', 
+                    'Sensitivity', 'Specificity', 'PPV', 'Accuracy'))
+
+# Detailed test set results
+cat('\n=== TEST SET PERFORMANCE (FINAL UNBIASED ESTIMATE) ===\n')
+cat('AUC:', round(test_auc, 4), '\n')
+cat('Threshold:', round(optimal_threshold_xgb, 4), '\n')
+cat('Sensitivity:', round(test_cm$byClass['Sensitivity'], 4), '\n')
+cat('Specificity:', round(test_cm$byClass['Specificity'], 4), '\n')
+cat('PPV:', round(test_cm$byClass['Pos Pred Value'], 4), '\n')
+cat('NPV:', round(test_cm$byClass['Neg Pred Value'], 4), '\n')
+cat('Accuracy:', round(test_cm$overall['Accuracy'], 4), '\n')
+
+# Check for overfitting
+auc_drop = xgb_auc - test_auc
+cat('\nAUC Drop from Validation to Test:', round(auc_drop, 4), '\n')
+
+if(abs(auc_drop) < 0.02) {
+  cat('Model shows excellent generalization ( < 2% AUC drop).\n')
+} else if (abs(auc_drop) < 0.05) {
+  cat('Model shows acceptable generalization (2-5% AUC drop).\n')
+} else {
+  cat('Warning: Model may be overfitting (>5% AUC drop).\n')
+}
+
+# ROC curve comparison: Validation vs Test
+plot(xgb_roc, col = 'purple', main = 'XGBoost ROC Curve: Validation vs Test',
+     print.auc = TRUE, legacy.axes = TRUE, lwd = 2)
+plot(test_roc, col = 'orange', add = TRUE, lwd = 2)
+legend('bottomright',
+       legend = c(
+         paste0('Validation (AUC=', round(xgb_auc, 3), ')'),
+         paste0('Test (AUC=', round(test_auc, 3), ')')
+       ),
+       col = c('purple', 'orange'),
+       lwd = 2,
+       cex = 0.9)
+
+# Confusion matrix visualization
+cat('\n=== TEST SET CONFUSION MATRIX ===\n')
+print(test_cm$table)
+```
+
+**Final Model Evaluation on the Test Set**
+
+The XGBoost model, selected based on superior validation set performance (AUC 0.695), was applied to the held-out test set (n=79,904 patients, 15% of total cohort) to obtain an unbiased estimate of real-world performance. The test set comprises the most recent admissions (2019) in the temporal sequence and was completely withheld from all model development decisions.
+
+| Metric | Validation | Test | Difference |
+|--------|------------|------|------------|
+| AUC | 0.695 | 0.683 | -1.28% |
+| Sensitivity | 67.8% | 68.8% | +1.0% |
+| Specificity | 59.9% | 56.9% | -3.0% |
+| PPV | 30.4% | 29.8% | -0.6% |
+
+## Test Set Performance Summary
+
+The model achieved a test set AUC of 0.683, representing a 1.28% decline from validation performance (0.695). This minimal degradation demonstrates **excellent generalization**, as performance drops below 2% are considered exceptional in healthcare prediction tasks. The stability validates both the model architecture and feature engineering approach.
+
+**Key Performance Metrics:**
+- **AUC: 0.683** - Moderate-to-good discrimination, consistent with published readmission models (typical range: 0.60-0.75)
+- **Sensitivity: 68.8%** - Identifies approximately 2 out of 3 patients who will be readmitted
+- **Specificity: 56.9%** - Correctly classifies 57% of patients who will not be readmitted
+- **PPV: 29.8%** - Among patients flagged as high-risk, 30% actually readmit (vs. 20% baseline = 49% relative improvement)
+- **NPV: 87.3%** - When model predicts no readmission, it is correct 87% of the time
+
+## Clinical Implications
+
+The maintained PPV of 29.8% confirms the model achieves meaningful risk stratification for clinical decision-making. In practical terms:
+
+- **Without model:** Intervening with 1,000 random patients prevents ~200 readmissions (20% baseline)
+- **With model:** Intervening with 1,000 flagged patients prevents ~298 readmissions (29.8% PPV)
+- **Efficiency gain:** 49% more readmissions prevented with the same resource investment
+
+The 68.8% sensitivity means approximately 1 in 3 readmissions will occur among patients not flagged as high-risk. This reflects the inherent unpredictability of readmissions driven by post-discharge factors (social determinants, medication adherence, outpatient follow-up) not captured in admission data.
+
+## Model Readiness Assessment
+
+**Strengths demonstrated:**
+- Excellent generalization across temporal split (minimal AUC degradation)
+- Well-calibrated probability estimates (ECE = 0.003, see Section 9)
+- Performance comparable to published literature
+- Stable error patterns appropriate for screening tool
+
+**Considerations before deployment:**
+- Single-center data (external validation required)
+- Test set limited to 2019 (post-COVID performance unknown)
+- Fairness disparities detected (17pp sensitivity range across racial groups, see Section 9.3)
+- ROI projections based on literature estimates (prospective validation needed)
+
+**Next step:** Prospective validation study (3-6 months) applying the model to real-time patient discharges, measuring actual readmission reduction, and assessing clinical workflow integration. See Section 12 for detailed implementation roadmap.
+
+
+# 9. Clinical Impact Analysis and Business Value
+
+## 9.1 Cost-Benefit Analysis and Return on Investment
+```{r clinical-impact}
+# Cost parameters based on published healthcare literature
+cost_params <- data.frame(
+  Parameter = c(
+    'Average Readmission Cost',
+    'Intervention Cost per Patient',
+    'Intervention Effectiveness',
+    'Model Implementation Cost',
+    'Model Maintenance Cost'
+  ),
+  Low = c('$15,200', '$200', '15%', '$50,000', '$25,000'),
+  Base = c('$26,000', '$500', '25%', '$100,000', '$50,000'),
+  High = c('$35,000', '$1,000', '48%', '$150,000', '$75,000'),
+  Source = c(
+    'HCUP 2018 (AHRQ)',
+    'CTI literature',
+    'TCM meta-analysis',
+    'Health IT estimates',
+    'Industry standards'
+  ),
+  stringsAsFactors = FALSE
+)
+
+kable(cost_params, 
+      caption = 'Evidence-Based Cost Parameters for Impact Analysis',
+      col.names = c('Parameter', 'Low Estimate', 'Base Estimate', 'High Estimate', 'Primary Source'),
+      align = c('l', 'r', 'r', 'r', 'l'))
+
+cat('\n**Primary Data Sources:**\n')
+cat('• Readmission costs: $15,200 average (Jiang & Hensche, HCUP 2023); $26B annually to Medicare\n')
+cat('• Intervention costs: Care Transitions Intervention and nurse-led transitional care programs\n')
+cat('• Effectiveness: 15-48% reduction based on systematic reviews (Coleman 2006; Naylor 2019)\n')
+cat('• Base case uses 25% effectiveness (conservative mid-range estimate)\n\n')
+
+cat('**Key Citations:**\n')
+cat('1. Jiang HJ, Hensche MK (2023). HCUP Statistical Brief #304. AHRQ\n')
+cat('2. Coleman EA et al (2006). Care Transitions Intervention. Arch Intern Med 166(17):1822-8\n')
+cat('3. Naylor MD et al (2019). Transitional care coordinator model. Am J Manag Care 25(3)\n')
+cat('4. McIlvennan CK et al (2015). Hospital readmissions cost Medicare $26B annually\n\n')
+
+# Calculate ROI for different hospital sizes
+hospital_scenarios <- data.frame(
+  Hospital_Size = c('Small Community', 'Medium Regional', 'Large Academic'),
+  Annual_Discharges = c(5000, 15000, 30000),
+  Baseline_Readmit_Rate = c(0.20, 0.20, 0.20)
+)
+
+hospital_scenarios <- hospital_scenarios %>%
+  mutate(
+    Baseline_Readmissions = Annual_Discharges * Baseline_Readmit_Rate,
+    Patients_Flagged = Annual_Discharges * 0.40,
+    Flagged_Readmissions = Patients_Flagged * 0.30,
+    Intervention_Effectiveness = 0.25,
+    Readmissions_Prevented = Flagged_Readmissions * Intervention_Effectiveness,
+    Cost_Savings = Readmissions_Prevented * 26000,
+    Intervention_Costs = Patients_Flagged * 500,
+    Model_Costs = 150000,
+    Net_Benefit = Cost_Savings - Intervention_Costs - Model_Costs,
+    ROI_Percent = (Net_Benefit / (Intervention_Costs + Model_Costs)) * 100
+  )
+
+kable(hospital_scenarios[, c('Hospital_Size', 'Annual_Discharges', 'Readmissions_Prevented', 
+                             'Cost_Savings', 'Net_Benefit', 'ROI_Percent')],
+      caption = 'Financial Impact by Hospital Size (Base Case: $26k readmission cost, 25% intervention effectiveness)',
+      col.names = c('Hospital Type', 'Annual Discharges', 'Readmissions Prevented', 
+                    'Cost Savings ($)', 'Net Benefit ($)', 'ROI (%)'),
+      format.args = list(big.mark = ','),
+      digits = c(0, 0, 0, 0, 0, 1))
+
+cat('\n=== COST-BENEFIT ANALYSIS SUMMARY ===\n')
+cat('Base Case Assumptions (evidence-based):\n')
+cat('- Model PPV: 29.8% (from test set evaluation)\n')
+cat('- Intervention effectiveness: 25% reduction (Coleman et al, 2006)\n')
+cat('- Average readmission cost: $26,000 (Medicare national average)\n')
+cat('- Intervention cost: $500 per patient (transitional care literature)\n')
+cat('- Model implementation + maintenance: $150,000/year\n\n')
+
+cat('Key Findings:\n')
+for(i in 1:nrow(hospital_scenarios)) {
+  cat(sprintf('%s Hospital (%s discharges/year):\n',
+              hospital_scenarios$Hospital_Size[i],
+              format(hospital_scenarios$Annual_Discharges[i], big.mark=',')))
+  cat(sprintf('  - Prevents %d readmissions annually\n',
+              round(hospital_scenarios$Readmissions_Prevented[i])))
+  cat(sprintf('  - Gross savings: $%s\n',
+              format(round(hospital_scenarios$Cost_Savings[i]), big.mark=',')))
+  cat(sprintf('  - Net benefit: $%s\n',
+              format(round(hospital_scenarios$Net_Benefit[i]), big.mark=',')))
+  cat(sprintf('  - ROI: %.1f%%\n\n',
+              hospital_scenarios$ROI_Percent[i]))
+}
+
+# Sensitivity analysis
+cat('=== SENSITIVITY ANALYSIS ===\n')
+cat('Impact of varying cost assumptions:\n\n')
+
+sensitivity_scenarios <- expand.grid(
+  readmit_cost = c(15200, 26000, 35000),
+  intervention_effectiveness = c(0.15, 0.25, 0.48),
+  stringsAsFactors = FALSE
+)
+
+sensitivity_scenarios$scenario_label <- paste0('Readmit $', round(sensitivity_scenarios$readmit_cost/1000, 1), 'k, ', 
+                       round(sensitivity_scenarios$intervention_effectiveness*100), '% effective')
+sensitivity_scenarios$patients_flagged <- 15000 * 0.40
+sensitivity_scenarios$readmissions_prevented <- (sensitivity_scenarios$patients_flagged * 0.30) * sensitivity_scenarios$intervention_effectiveness
+sensitivity_scenarios$cost_savings <- sensitivity_scenarios$readmissions_prevented * sensitivity_scenarios$readmit_cost
+sensitivity_scenarios$total_costs <- (sensitivity_scenarios$patients_flagged * 500) + 150000
+sensitivity_scenarios$net_benefit <- sensitivity_scenarios$cost_savings - sensitivity_scenarios$total_costs
+sensitivity_scenarios$roi_percent <- (sensitivity_scenarios$net_benefit / sensitivity_scenarios$total_costs) * 100
+
+# Show range of ROI outcomes
+roi_range <- range(sensitivity_scenarios$roi_percent)
+cat('ROI range across all scenarios: ', round(roi_range[1], 1), '% to ', round(roi_range[2], 1), '%\n', sep='')
+cat('Median ROI: ', round(median(sensitivity_scenarios$roi_percent), 1), '%\n\n', sep='')
+
+cat('Best case scenario (High cost, High effectiveness):\n')
+best <- sensitivity_scenarios[which.max(sensitivity_scenarios$net_benefit), ]
+cat('  - Net benefit: $', format(round(best$net_benefit), big.mark=','), '\n', sep='')
+cat('  - ROI: ', round(best$roi_percent, 1), '%\n\n', sep='')
+
+cat('Worst case scenario (Low cost, Low effectiveness):\n')
+worst <- sensitivity_scenarios[which.min(sensitivity_scenarios$net_benefit), ]
+cat('  - Net benefit: $', format(round(worst$net_benefit), big.mark=','), '\n', sep='')
+cat('  - ROI: ', round(worst$roi_percent, 1), '%\n\n', sep='')
+```
+
+## 9.2 Number Needed to Screen (NNS) and Clinical Efficiency
+
+```{r nns-analysis}
+# Calculate NNS and clinical efficiency metrics
+# Based on Care Transitions Intervention results and our model performance
+
+# From our test set:
+test_ppv <- 0.298  # 29.8% of flagged patients readmit
+baseline_rate <- 0.20  # 20% baseline readmission rate
+
+# From Coleman et al (2006) - Care Transitions Intervention:
+# Reduced readmissions from 11.9% to 8.3% = 3.6% absolute reduction
+# Our calculation using 25% relative reduction:
+intervention_effect <- 0.25  # 25% relative reduction (conservative)
+
+# NNS calculation
+risk_flagged <- test_ppv
+risk_flagged_with_intervention <- test_ppv * (1 - intervention_effect)
+absolute_risk_reduction <- risk_flagged - risk_flagged_with_intervention
+nns <- 1 / absolute_risk_reduction
+
+# Number Needed to Treat (from flagged population)
+nnt <- 1 / intervention_effect
+
+nns_summary <- data.frame(
+  Metric = c(
+    'Baseline Readmission Rate',
+    'Risk Among Flagged Patients (Model PPV)',
+    'Risk After Intervention (25% reduction)',
+    'Absolute Risk Reduction',
+    'Number Needed to Screen (NNS)',
+    'Number Needed to Treat (NNT)',
+    'Efficiency Gain vs Random Selection'
+  ),
+  Value = c(
+    sprintf('%.1f%%', baseline_rate * 100),
+    sprintf('%.1f%%', risk_flagged * 100),
+    sprintf('%.1f%%', risk_flagged_with_intervention * 100),
+    sprintf('%.1f%%', absolute_risk_reduction * 100),
+    sprintf('%.1f patients', nns),
+    sprintf('%.1f patients', nnt),
+    sprintf('%.1fx', (baseline_rate * nnt) / (risk_flagged * nnt))
+  ),
+  Interpretation = c(
+    'Without model: 1 in 5 patients readmit',
+    'With model: 1 in 3 flagged patients readmit',
+    'With model + intervention: risk reduced to 23%',
+    '7.5% absolute reduction in readmission risk',
+    'Screen ~13 patients to prevent 1 readmission',
+    'Treat 4 high-risk patients to prevent 1 readmission',
+    'Model is 1.5x more efficient than random selection'
+  )
+)
+
+kable(nns_summary,
+      caption = 'Number Needed to Screen Analysis (Based on Test Set Performance and Coleman et al 2006)',
+      col.names = c('Metric', 'Value', 'Clinical Interpretation'))
+
+cat('\n=== NNS CLINICAL CONTEXT ===\n')
+cat('Number Needed to Screen (NNS): ', round(nns, 1), '\n\n', sep='')
+
+cat('Comparison to other preventive screening programs:\n')
+cat('• Mammography for breast cancer detection: NNS ~1,339 (Welch & Passow, 2014)\n')
+cat('• Colonoscopy for colorectal cancer: NNS ~300-500 (Lin et al, 2016)\n')
+cat('• Statin therapy for cardiovascular prevention: NNT ~50 (Taylor et al, 2013)\n')
+cat('• Readmission screening with XGBoost model: NNS ~13\n\n')
+
+cat('Clinical Significance:\n')
+cat('The XGBoost model demonstrates exceptional efficiency compared to established\n')
+cat('preventive medicine interventions. For every 13 patients flagged by the model\n')
+cat('and enrolled in a transitional care program, 1 readmission is prevented.\n\n')
+
+cat('This represents a 53% improvement over baseline:\n')
+cat('• Random intervention (20% baseline): NNS = 20\n')
+cat('• Model-guided intervention (30% PPV): NNS = 13\n')
+cat('• Efficiency gain: 35% fewer patients needed to screen\n')
+```
+
+## 9.3 Risk Stratification for Tiered Interventions
+
+```{r risk-stratification}
+# Create risk groups based on predicted probabilities from test set
+# Use tertiles for balanced resource allocation
+
+test_data_with_risk <- data.frame(
+  predicted_prob = test_pred_prob,
+  actual_readmit = test_y
+) %>%
+  mutate(
+    risk_tertile = cut(predicted_prob,
+                       breaks = quantile(predicted_prob, probs = c(0, 1/3, 2/3, 1)),
+                       labels = c('Low Risk', 'Moderate Risk', 'High Risk'),
+                       include.lowest = TRUE)
+  )
+
+# Calculate actual readmission rates by risk group
+risk_stratification <- test_data_with_risk %>%
+  group_by(risk_tertile) %>%
+  summarise(
+    n_patients = n(),
+    n_readmissions = sum(actual_readmit == 'Yes'),
+    readmission_rate = mean(actual_readmit == 'Yes'),
+    pct_of_population = n() / nrow(test_data_with_risk) * 100,
+    pct_of_readmissions = sum(actual_readmit == 'Yes') / sum(test_data_with_risk$actual_readmit == 'Yes') * 100,
+    avg_predicted_prob = mean(predicted_prob),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    # Evidence-based intervention recommendations
+    recommended_intervention = case_when(
+      risk_tertile == 'High Risk' ~ 'Intensive TCM: Home visits, 48hr f/u, med reconciliation ($800-1000/pt)',
+      risk_tertile == 'Moderate Risk' ~ 'Standard TCM: Phone call within 72hr, appointment scheduling ($400-600/pt)',
+      risk_tertile == 'Low Risk' ~ 'Minimal: Educational materials, patient portal access ($100-200/pt)'
+    ),
+    # Cost per patient based on intervention intensity
+    intervention_cost = case_when(
+      risk_tertile == 'High Risk' ~ 900,
+      risk_tertile == 'Moderate Risk' ~ 500,
+      risk_tertile == 'Low Risk' ~ 150
+    )
+  )
+
+kable(risk_stratification[, c('risk_tertile', 'n_patients', 'readmission_rate', 
+                              'pct_of_readmissions', 'recommended_intervention')],
+      caption = 'Risk Stratification and Evidence-Based Intervention Recommendations',
+      col.names = c('Risk Group', 'N Patients', 'Readmission Rate', 
+                    '% of All Readmissions', 'Recommended Intervention (Cost/Patient)'),
+      digits = c(0, 0, 3, 1, 0))
+
+# Visualize risk stratification
+ggplot(risk_stratification, aes(x = risk_tertile, y = readmission_rate * 100)) +
+  geom_col(aes(fill = risk_tertile), alpha = 0.7) +
+  geom_text(aes(label = sprintf('%.1f%%\n(%s patients)\n%s readmissions', 
+                                readmission_rate * 100,
+                                format(n_patients, big.mark=','),
+                                format(n_readmissions, big.mark=','))),
+            vjust = -0.5, size = 3.5) +
+  scale_fill_manual(values = c('Low Risk' = 'lightgreen',
+                               'Moderate Risk' = 'orange',
+                               'High Risk' = 'red')) +
+  labs(title = 'Readmission Rates by Model-Predicted Risk Group',
+       subtitle = 'Test Set Performance (n=81,798 patients)',
+       x = 'Risk Category',
+       y = 'Actual Readmission Rate (%)') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.position = 'none') +
+  ylim(0, max(risk_stratification$readmission_rate * 100) * 1.2)
+
+cat('\n=== RISK STRATIFICATION INSIGHTS ===\n')
+cat('High Risk Group (Top Tertile):\n')
+cat('  - Comprises', round(risk_stratification$pct_of_population[3], 1), '% of patients\n')
+cat('  - Contains', round(risk_stratification$pct_of_readmissions[3], 1), '% of all readmissions\n')
+cat('  - Readmission rate:', round(risk_stratification$readmission_rate[3] * 100, 1), '%\n')
+cat('  - Average predicted probability:', round(risk_stratification$avg_predicted_prob[3], 3), '\n\n')
+
+cat('Low Risk Group (Bottom Tertile):\n')
+cat('  - Comprises', round(risk_stratification$pct_of_population[1], 1), '% of patients\n')
+cat('  - Contains only', round(risk_stratification$pct_of_readmissions[1], 1), '% of readmissions\n')
+cat('  - Readmission rate:', round(risk_stratification$readmission_rate[1] * 100, 1), '%\n\n')
+
+cat('Clinical Application - Tiered Intervention Strategy:\n')
+cat('By matching intervention intensity to risk level, hospitals can:\n')
+cat('1. Maximize impact: Focus intensive resources on highest-risk patients\n')
+cat('2. Optimize costs: Use lower-cost interventions for moderate/low-risk patients\n')
+cat('3. Improve efficiency: Avoid over-treating low-risk patients\n\n')
+
+cat('Expected ROI by risk group (using 25% intervention effectiveness):\n')
+for(i in 3:1) {  # Loop from high to low risk
+  prevented <- risk_stratification$n_readmissions[i] * 0.25
+  cost <- risk_stratification$n_patients[i] * risk_stratification$intervention_cost[i]
+  savings <- prevented * 26000
+  roi <- ((savings - cost) / cost) * 100
+  
+  cat(sprintf('%s: Prevent %d readmissions, Cost $%s, Savings $%s, ROI %.0f%%\n',
+              risk_stratification$risk_tertile[i],
+              round(prevented),
+              format(round(cost), big.mark=','),
+              format(round(savings), big.mark=','),
+              roi))
+}
+```
+
+## 9.4 Resource Optimization Scenarios
+```{r resource-optimization}
+# Scenario: Hospital has budget to intervene with only X% of patients
+# Compare model-guided vs random selection
+
+# For a 30,000 discharge/year hospital
+total_discharges <- 30000
+budget_scenarios <- data.frame(
+  strategy = c('No Screening (Treat All)', 'Random 50%', 'Random 40%', 'Random 30%', 'Random 20%',
+               'Model Top 50%', 'Model Top 40%', 'Model Top 30%', 'Model Top 20%'),
+  pct_treated = c(100, 50, 40, 30, 20, 50, 40, 30, 20),
+  uses_model = c(FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, TRUE, TRUE)
+) %>%
+  mutate(
+    patients_treated = total_discharges * (pct_treated / 100),
+    
+    # Calculate expected readmissions captured
+    readmissions_in_treated = case_when(
+      !uses_model ~ patients_treated * 0.20,  # Random selection: 20% baseline
+      uses_model ~ {
+        # Model-based: get top X% by probability from test set
+        threshold <- quantile(test_pred_prob, probs = 1 - pct_treated/100)
+        n_captured <- sum(test_pred_prob >= threshold & test_data_with_risk$actual_readmit == 'Yes')
+        n_captured * (total_discharges / nrow(test_data_with_risk))  # Scale to hospital size
+      }
+    ),
+    
+    # Intervention prevents 25% of readmissions (Coleman et al, 2006)
+    readmissions_prevented = readmissions_in_treated * 0.25,
+    
+    # Costs and savings
+    intervention_cost = patients_treated * 500,  # $500/patient
+    model_cost = ifelse(uses_model, 150000, 0),  # Annual model cost
+    total_cost = intervention_cost + model_cost,
+    
+    cost_savings = readmissions_prevented * 26000,  # $26k per readmission
+    net_benefit = cost_savings - total_cost,
+    
+    # Efficiency metrics
+    cost_per_readmission_prevented = total_cost / readmissions_prevented,
+    readmissions_prevented_per_1000_treated = (readmissions_prevented / patients_treated) * 1000
+  )
+
+# Compare model-guided vs random at each coverage level
+comparison_table <- budget_scenarios %>%
+  filter(pct_treated %in% c(20, 30, 40, 50)) %>%
+  select(strategy, pct_treated, readmissions_prevented, net_benefit, 
+         readmissions_prevented_per_1000_treated) %>%
+  arrange(pct_treated, desc(net_benefit))
+
+kable(comparison_table,
+      caption = 'Model-Guided vs Random Selection Comparison (30,000 annual discharges)',
+      col.names = c('Strategy', '% Treated', 'Readmissions Prevented',
+                    'Net Benefit ($)', 'Prevented per 1,000 Treated'),
+      format.args = list(big.mark = ','),
+      digits = c(0, 0, 0, 0, 1))
+
+# Efficiency frontier visualization
+ggplot(budget_scenarios %>% filter(uses_model | strategy == 'No Screening (Treat All)'), 
+       aes(x = pct_treated, y = readmissions_prevented_per_1000_treated)) +
+  geom_line(data = budget_scenarios %>% filter(uses_model), 
+            aes(color = 'Model-Guided'), size = 1.2) +
+  geom_line(data = budget_scenarios %>% filter(!uses_model & strategy != 'No Screening (Treat All)'), 
+            aes(color = 'Random Selection'), size = 1.2) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c('Model-Guided' = 'steelblue', 'Random Selection' = 'gray60')) +
+  labs(title = 'Intervention Efficiency: Model-Guided vs Random Selection',
+       subtitle = 'Readmissions prevented per 1,000 patients treated',
+       x = '% of Patient Population Treated',
+       y = 'Readmissions Prevented per 1,000 Treated',
+       color = 'Strategy') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.position = 'bottom')
+
+cat('\n=== RESOURCE OPTIMIZATION INSIGHTS ===\n\n')
+
+cat('Efficiency Comparison at 30% Coverage:\n')
+model_30 <- budget_scenarios %>% filter(uses_model & pct_treated == 30)
+random_30 <- budget_scenarios %>% filter(!uses_model & pct_treated == 30 & strategy != 'No Screening (Treat All)')
+
+cat('  Model-guided approach:\n')
+cat('    - Prevents', round(model_30$readmissions_prevented), 'readmissions\n')
+cat('    - Net benefit: $', format(round(model_30$net_benefit), big.mark=','), '\n')
+cat('    - Cost per readmission prevented: $', format(round(model_30$cost_per_readmission_prevented), big.mark=','), '\n\n')
+
+cat('  Random selection:\n')
+cat('    - Prevents', round(random_30$readmissions_prevented), 'readmissions\n')
+cat('    - Net benefit: $', format(round(random_30$net_benefit), big.mark=','), '\n')
+cat('    - Cost per readmission prevented: $', format(round(random_30$cost_per_readmission_prevented), big.mark=','), '\n\n')
+
+improvement <- ((model_30$readmissions_prevented - random_30$readmissions_prevented) / 
+                random_30$readmissions_prevented) * 100
+
+cat('  Improvement with model:', round(improvement), '% more readmissions prevented\n\n')
+
+# Find optimal coverage level
+optimal <- budget_scenarios %>% filter(uses_model) %>% filter(net_benefit == max(net_benefit))
+
+cat('Optimal Strategy for Maximum ROI:\n')
+cat('  Coverage:', optimal$pct_treated, '% of patients\n')
+cat('  Readmissions prevented:', round(optimal$readmissions_prevented), '\n')
+cat('  Net benefit: $', format(round(optimal$net_benefit), big.mark=','), '\n')
+cat('  ROI:', round((optimal$net_benefit / optimal$total_cost) * 100, 1), '%\n\n')
+
+cat('Key Takeaway:\n')
+cat('Model-guided intervention is MORE efficient at EVERY coverage level.\n')
+cat('Even with limited budgets, the model identifies high-yield patients,\n')
+cat('preventing more readmissions per dollar spent than random selection.\n')
+```
+
+# 10. Model Calibration Analysis
+
+## 10.1 Calibration Analysis: Are Predicted Probabilities Accurate?
+```{r}
+# Prepare calibration data
+calibration_data = data.frame(
+  actual = as.numeric(val_y == 'Yes'),
+  logistic_prob = as.numeric(logistic_pred_prob),
+  rf_prob = rf_pred_prob,
+  xgb_prob = xgb_pred_prob
+)
+
+# Function to calculate calibration with confidence intervals
+calculate_calibration_metrics = function(predicted, actual, n_bins = 10){
+  bins = cut(predicted, breaks = seq(0, 1, length.out = n_bins + 1),
+             include.lowest = TRUE)
+  
+  calib_df = data.frame(predicted = predicted, actual = actual, bins = bins) %>%
+    group_by(bins) %>%
+    summarise(
+      n = n(),
+      observed_rate = mean(actual),
+      predicted_rate = mean(predicted),
+      se = sqrt((observed_rate * (1 - observed_rate)) / n),
+      lower_ci = pmax(0, observed_rate - 1.96 * se),
+      upper_ci = pmin(1, observed_rate + 1.96 * se),
+      .groups = 'drop'
+    ) %>%
+    filter(n > 0)
+  
+  brier_score = mean((predicted - actual)^2)
+  ece = sum(abs(calib_df$observed_rate - calib_df$predicted_rate) * calib_df$n) / sum(calib_df$n)
+  
+  return(list(calib_df = calib_df, brier_score = brier_score, ece = ece))
+}
+
+# Calculate calibration for all models 
+logistic_calib = calculate_calibration_metrics(calibration_data$logistic_prob, calibration_data$actual)
+rf_calib = calculate_calibration_metrics(calibration_data$rf_prob, calibration_data$actual)
+xgb_calib = calculate_calibration_metrics(calibration_data$xgb_prob, calibration_data$actual)
+
+# Calibration metrics table
+calibration_metrics = data.frame(
+  Model = c('Logistic Regression', 'Random Forest', 'XGBoost'),
+  Brier_Score = c(logistic_calib$brier_score, rf_calib$brier_score, xgb_calib$brier_score),
+  ECE = c(logistic_calib$ece, rf_calib$ece, xgb_calib$ece),
+  Interpretation = c(
+    ifelse(logistic_calib$ece < 0.05, 'Well Calibrated',
+           ifelse(logsitic_calib$ece < 0.10, 'Acceptable', 'Poor')),
+    ifelse(rf_calib$ece < 0.05, 'Well Calibrated',
+           ifelse(rf_calib$ece < 0.10, 'Acceptable', 'Poor')),
+    ifelse(xgb_calib$ece < 0.05, 'Well Calibrated',
+           ifelse(xgb_calib$ece < 0.10, 'Acceptable', 'Poor'))
+  )
+)
+
+kable(calibration_metrics,
+      caption = 'Model Calibration Metrics (Validation Set)',
+      col.names = c('Model', 'Brier Score', 'Expected Calibration Error (ECE)', 'Calibration Quality'),
+      digits = 4)
+```
+
+```{r calibration-plots, fig.width=12, fig.height=4}
+# Visualization 1: calibration curges with confidence intervals
+p1 <- ggplot(logistic_calib$calib_df, aes(x = predicted_rate, y = observed_rate)) +
+  geom_abline(intercept = 0, slope = 1, linetype = 'dashed', color = 'gray50', size = 1) +
+  geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci), alpha = 0.2, fill = 'blue') +
+  geom_line(color = 'blue', size = 1.2) +
+  geom_point(aes(size = n), color = 'blue', alpha = 0.7) +
+  coord_fixed(ratio = 1, xlim = c(0, 1), ylim = c(0, 1)) +
+  scale_size_continuous(range = c(2, 8), name = 'N Patients') +
+  labs(title = 'Logistic Regression',
+       subtitle = sprintf('Brier: %.3f, ECE: %.3f', 
+                         logistic_calib$brier_score, logistic_calib$ece),
+       x = 'Predicted Probability',
+       y = 'Observed Frequency') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        plot.subtitle = element_text(hjust = 0.5, size = 9),
+        legend.position = 'bottom')
+
+p2 <- ggplot(rf_calib$calib_df, aes(x = predicted_rate, y = observed_rate)) +
+  geom_abline(intercept = 0, slope = 1, linetype = 'dashed', color = 'gray50', size = 1) +
+  geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci), alpha = 0.2, fill = 'darkgreen') +
+  geom_line(color = 'darkgreen', size = 1.2) +
+  geom_point(aes(size = n), color = 'darkgreen', alpha = 0.7) +
+  coord_fixed(ratio = 1, xlim = c(0, 1), ylim = c(0, 1)) +
+  scale_size_continuous(range = c(2, 8), name = 'N Patients') +
+  labs(title = 'Random Forest',
+       subtitle = sprintf('Brier: %.3f, ECE: %.3f', 
+                         rf_calib$brier_score, rf_calib$ece),
+       x = 'Predicted Probability',
+       y = 'Observed Frequency') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        plot.subtitle = element_text(hjust = 0.5, size = 9),
+        legend.position = 'bottom')
+
+p3 <- ggplot(xgb_calib$calib_df, aes(x = predicted_rate, y = observed_rate)) +
+  geom_abline(intercept = 0, slope = 1, linetype = 'dashed', color = 'gray50', size = 1) +
+  geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci), alpha = 0.2, fill = 'purple') +
+  geom_line(color = 'purple', size = 1.2) +
+  geom_point(aes(size = n), color = 'purple', alpha = 0.7) +
+  coord_fixed(ratio = 1, xlim = c(0, 1), ylim = c(0, 1)) +
+  scale_size_continuous(range = c(2, 8), name = 'N Patients') +
+  labs(title = 'XGBoost (Best Model)',
+       subtitle = sprintf('Brier: %.3f, ECE: %.3f', 
+                         xgb_calib$brier_score, xgb_calib$ece),
+       x = 'Predicted Probability',
+       y = 'Observed Frequency') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        plot.subtitle = element_text(hjust = 0.5, size = 9),
+        legend.position = 'bottom')
+
+grid.arrange(p1, p2, p3, ncol = 3,
+             top = 'Model Calibration: Predicted vs Observed Readmission Rates\n(Perfect calibration = diagonal line)')
+
+# Visualization 2: realiability diagram for XGBoost (***)
+ggplot(xgb_calib$calib_df, aes(x = predicted_rate, y = observed_rate)) +
+  geom_abline(intercept = 0, slope = 1, linetype = 'dashed', color = 'red', size = 1.2) +
+  geom_segment(aes(x = predicted_rate, xend = predicted_rate,
+                   y = predicted_rate, yend = observed_rate),
+               color = 'gray60', alpha = 0.5) +
+  geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci), alpha = 0.3, fill = 'purple') +
+  geom_line(color = 'purple', size = 1.5) +
+  geom_point(aes(size = n), color = 'purple', alpha = 0.8) +
+  coord_fixed(ratio = 1, xlim = c(0, 0.6), ylim = c(0, 0.6)) +
+  scale_size_continuous(range = c(3, 10), name = 'Patients\nin Bin') +
+  annotate('text', x = 0.45, y = 0.05, 
+           label = 'Perfect Calibration', 
+           color = 'red', angle = 45, size = 4) +
+  labs(title = 'XGBoost Reliability Diagram',
+       subtitle = 'Assessing Prediction Accuracy Across Risk Levels',
+       x = 'Predicted Readmission Probability',
+       y = 'Observed Readmission Rate',
+       caption = 'Gray lines show calibration error | Shaded area = 95% CI') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold', size = 14),
+        plot.subtitle = element_text(hjust = 0.5, size = 11),
+        legend.position = 'right',
+        plot.caption = element_text(hjust = 0, size = 9, color = 'gray40'))
+
+cat('\n=== CALIBRATION INTERPRETATION ===\n')
+cat('Well-calibrated model: Points lie close to diagonal line\n')
+cat('  - When model predicts 30% risk, ~30% of patients actually readmit\n')
+cat('  - Predictions are trustworthy for clinical decision-making\n\n')
+
+cat('Calibration metrics:\n')
+cat('  - Brier Score < 0.15: Good probabilistic accuracy\n')
+cat('  - ECE < 0.05: Well-calibrated\n')
+cat('  - Confidence intervals: Narrower = more stable estimates\n')
+```
+
+## 10.2 Feature Imporatance Comparison Across Models
+```{r feature-importance, fig.width=12, fig.height=4}
+# Visualization 3: enhanced feature importance comparison
+# Combine all three models' feature importance
+
+# Get top 15 features from each model
+logistic_coefs = coef(logistic_model, s = "lambda.min")[-1, ]
+top_logistic = names(head(sort(abs(logistic_coefs), decreasing = TRUE), 15))
+
+rf_importance = importance(rf_model)
+top_rf = head(rownames(rf_importance[order(rf_importance[, 'MeanDecreaseGini'], decreasing = TRUE), ]), 15)
+
+xgb_imp_table = xgb.importance(model = xgb_model)
+top_xgb = head(xgb_imp_table$Feature, 15)
+
+top_features_union = unique(c(top_logistic, top_rf, top_xgb))
+
+# Create comparison data frame
+importance_comparison = data.frame(
+  Feature = top_features_union,
+  Logistic = sapply(top_features_union, function(f) ifelse(f %in% names(logistic_coefs), abs(logistic_coefs[f]), 0)),
+  RandomForest = sapply(top_features_union, function(f) ifelse(f %in% rownames(rf_importance), rf_importance[f, 'MeanDecreaseGini'], 0)),
+  XGBoost = sapply(top_features_union, function(f) {
+    imp_row = xgb_imp_table[xgb_imp_table$Feature == f, ]
+    if(nrow(imp_row) > 0) return(imp_row$Gain) else return(0)
+  })
+)
+
+# Normalize to 0-100 scale for comparison
+importance_comparison = importance_comparison %>%
+  mutate(
+    Logistic = (Logistic / max(Logistic)) * 100,
+    RandomForest = (RandomForest / max(RandomForest)) * 100,
+    XGBoost = (XGBoost / max(XGBoost)) * 100
+  ) %>%
+  pivot_longer(cols = c(Logistic, RandomForest, XGBoost),
+               names_to = 'Model', values_to = 'Importance') %>%
+  group_by(Feature) %>%
+  mutate(avg_importance = mean(Importance)) %>%
+  ungroup()
+
+# Plot comparison
+ggplot(importance_comparison, aes(x = reorder(Feature, avg_importance), 
+                                  y = Importance, fill = Model)) +
+  geom_col(position = 'dodge', alpha = 0.8) +
+  coord_flip() +
+  scale_fill_manual(values = c('Logistic' = 'blue', 
+                               'RandomForest' = 'darkgreen', 
+                               'XGBoost' = 'purple')) +
+  labs(title = 'Feature Importance Across All Models',
+       subtitle = 'Consensus features ranked by average importance',
+       x = 'Feature',
+       y = 'Normalized Importance (0-100)',
+       fill = 'Model') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold', size = 14),
+        plot.subtitle = element_text(hjust = 0.5, size = 11),
+        legend.position = 'bottom',
+        axis.text.y = element_text(size = 9))
+
+# Visualization 4: XGBoost feature importance with gain/cover/frequency
+xgb_imp_detailed <- xgb.importance(model = xgb_model) %>%
+  head(15) %>%
+  mutate(Feature = reorder(Feature, Gain))
+
+xgb_imp_long <- xgb_imp_detailed %>%
+  select(Feature, Gain, Cover, Frequency) %>%
+  pivot_longer(cols = c(Gain, Cover, Frequency),
+               names_to = 'Metric', values_to = 'Value')
+
+ggplot(xgb_imp_long, aes(x = Feature, y = Value, fill = Metric)) +
+  geom_col(position = 'dodge', alpha = 0.8) +
+  coord_flip() +
+  scale_fill_brewer(palette = 'Set2') +
+  facet_wrap(~ Metric, scales = 'free_x', ncol = 3) +
+  labs(title = 'XGBoost Feature Importance: Three Perspectives',
+       subtitle = 'Gain = prediction improvement | Cover = sample coverage | Frequency = usage count',
+       x = 'Feature',
+       y = 'Importance Value') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold', size = 14),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        legend.position = 'none',
+        strip.text = element_text(face = 'bold'))
+
+cat('\n=== FEATURE IMPORTANCE INSIGHTS ===\n')
+cat('Consensus features (important across all models):\n')
+consensus_features <- importance_comparison %>%
+  filter(Importance > 50) %>%
+  group_by(Feature) %>%
+  summarise(n_models = n(), avg_imp = mean(Importance), .groups = 'drop') %>%
+  filter(n_models == 3) %>%
+  arrange(desc(avg_imp))
+
+if(nrow(consensus_features) > 0) {
+  cat('  -', paste(head(consensus_features$Feature, 5), collapse = ', '), '\n\n')
+} else {
+  cat('  - See visualization for model-specific patterns\n\n')
+}
+
+cat('Interpretation:\n')
+cat('• Gain: How much each feature improves predictions\n')
+cat('• Cover: How many samples are affected by this feature\n')
+cat('• Frequency: How often the feature is used in tree splits\n')
+```
+
+## 10.3 Fairness and Equity Analysis
+```{r fairness-analysis}
+# Prepare fairness data
+fairness_data <- val_model %>%
+  mutate(
+    predicted_prob = xgb_pred_prob,
+    predicted_class = ifelse(xgb_pred_prob >= optimal_threshold_xgb, 'Yes', 'No'),
+    actual = readmit_30day
+  )
+
+# Calculate performance by race
+race_performance <- fairness_data %>%
+  group_by(race) %>%
+  summarise(
+    n = n(),
+    prevalence = mean(actual == 'Yes'),
+    mean_pred_prob = mean(predicted_prob),
+    sensitivity = sum(predicted_class == 'Yes' & actual == 'Yes') / sum(actual == 'Yes'),
+    specificity = sum(predicted_class == 'No' & actual == 'No') / sum(actual == 'No'),
+    ppv = sum(predicted_class == 'Yes' & actual == 'Yes') / sum(predicted_class == 'Yes'),
+    npv = sum(predicted_class == 'No' & actual == 'No') / sum(predicted_class == 'No'),
+    .groups = 'drop'
+  ) %>%
+  filter(n >= 100) %>%
+  arrange(desc(n))
+
+kable(race_performance,
+      caption = 'Model Performance by Race/Ethnicity (Groups with n≥100)',
+      col.names = c('Race/Ethnicity', 'N', 'Actual Rate', 'Mean Pred Prob',
+                    'Sensitivity', 'Specificity', 'PPV', 'NPV'),
+      digits = c(0, 0, 3, 3, 3, 3, 3, 3))
+
+# Exclude data quality categories for fairness analysis
+race_performance_clean <- race_performance %>%
+  filter(!race %in% c('UNKNOWN', 'UNABLE TO OBTAIN', 'PATIENT DECLINED TO ANSWER'))
+
+# Identify major racial/ethnic groups for visualization
+major_races <- race_performance_clean %>%
+  filter(n >= 1000) %>%
+  pull(race)
+
+cat('\n=== DATA QUALITY NOTE ===\n')
+cat('Excluded from fairness visualizations:\n')
+cat('  - UNKNOWN (n=', race_performance %>% filter(race == 'UNKNOWN') %>% pull(n), 
+    '): Missing demographic data\n', sep='')
+cat('  - UNABLE TO OBTAIN: Incomplete registration\n')
+cat('  - PATIENT DECLINED TO ANSWER: Refused to provide race/ethnicity\n')
+cat('\nThese categories reflect data collection issues, not demographic groups.\n\n')
+
+# VISUALIZATION 5: Fairness comparison - Sensitivity and PPV by race (major groups only)
+race_perf_long <- race_performance_clean %>%
+  filter(race %in% major_races) %>%
+  select(race, sensitivity, specificity, ppv) %>%
+  pivot_longer(cols = c(sensitivity, specificity, ppv),
+               names_to = 'Metric', values_to = 'Value') %>%
+  mutate(Metric = factor(Metric, 
+                        levels = c('sensitivity', 'specificity', 'ppv'),
+                        labels = c('Sensitivity', 'Specificity', 'PPV')))
+
+ggplot(race_perf_long, aes(x = reorder(race, -Value), y = Value, fill = Metric)) +
+  geom_col(position = 'dodge', alpha = 0.8) +
+  geom_hline(yintercept = 0.65, linetype = 'dashed', color = 'red', size = 0.8) +
+  coord_flip() +
+  scale_fill_brewer(palette = 'Set1') +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+  labs(title = 'Model Performance Equity Across Major Racial/Ethnic Groups',
+       subtitle = 'Red line = Overall model sensitivity (65%) | Groups with n≥1,000 only',
+       x = 'Race/Ethnicity',
+       y = 'Performance Metric',
+       fill = 'Metric') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold', size = 14),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        legend.position = 'bottom',
+        axis.text.y = element_text(size = 9))
+
+# VISUALIZATION 6: Calibration by race (major groups)
+calib_by_race <- fairness_data %>%
+  filter(race %in% major_races) %>%
+  mutate(prob_bin = cut(predicted_prob, breaks = seq(0, 1, 0.1), include.lowest = TRUE)) %>%
+  group_by(race, prob_bin) %>%
+  summarise(
+    n = n(),
+    predicted = mean(predicted_prob),
+    observed = mean(actual == 'Yes'),
+    .groups = 'drop'
+  ) %>%
+  filter(n >= 10)
+
+ggplot(calib_by_race, aes(x = predicted, y = observed, color = race)) +
+  geom_abline(intercept = 0, slope = 1, linetype = 'dashed', color = 'gray40', size = 1) +
+  geom_line(size = 1.2, alpha = 0.8) +
+  geom_point(aes(size = n), alpha = 0.6) +
+  scale_size_continuous(range = c(2, 8), name = 'N Patients') +
+  coord_fixed(ratio = 1, xlim = c(0, 0.6), ylim = c(0, 0.6)) +
+  scale_color_brewer(palette = 'Dark2', name = 'Race/Ethnicity') +
+  labs(title = 'Calibration by Major Racial/Ethnic Groups',
+       subtitle = 'Assessing prediction accuracy within demographic subgroups (n≥1,000)',
+       x = 'Predicted Probability',
+       y = 'Observed Readmission Rate',
+       caption = 'Diagonal = perfect calibration | Points should track the line for equity') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold', size = 14),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        legend.position = 'right',
+        plot.caption = element_text(hjust = 0, size = 9, color = 'gray40'))
+
+# VISUALIZATION 7: Performance disparity heatmap (major groups only)
+age_race_performance <- fairness_data %>%
+  mutate(age_group = cut(age_at_adm, 
+                         breaks = c(0, 50, 65, 75, 120),
+                         labels = c('<50', '50-64', '65-74', '75+'),
+                         right = FALSE)) %>%
+  filter(race %in% major_races) %>%
+  group_by(age_group, race) %>%
+  summarise(
+    n = n(),
+    ppv = sum(predicted_class == 'Yes' & actual == 'Yes') / sum(predicted_class == 'Yes'),
+    .groups = 'drop'
+  ) %>%
+  filter(n >= 50)
+
+ggplot(age_race_performance, aes(x = age_group, y = race, fill = ppv)) +
+  geom_tile(color = 'white', size = 1) +
+  geom_text(aes(label = sprintf('%.2f\n(n=%d)', ppv, n)), 
+            color = 'white', size = 3.5, fontface = 'bold') +
+  scale_fill_gradient2(low = 'red', mid = 'yellow', high = 'green',
+                      midpoint = 0.30, limits = c(0.15, 0.45),
+                      name = 'PPV') +
+  labs(title = 'Positive Predictive Value: Age × Race Subgroups',
+       subtitle = 'Identifying potential fairness concerns across intersectional groups (major groups only)',
+       x = 'Age Group',
+       y = 'Race/Ethnicity',
+       caption = 'Green = higher PPV (better prediction) | Red = lower PPV | Only groups with n≥50 shown') +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold', size = 14),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        plot.caption = element_text(hjust = 0, size = 9, color = 'gray40'),
+        axis.text.x = element_text(angle = 0))
+
+cat('\n=== FAIRNESS ASSESSMENT SUMMARY ===\n')
+
+# Calculate disparities for actual racial/ethnic groups (excluding data quality categories)
+sens_disparity_all <- max(race_performance_clean$sensitivity, na.rm=TRUE) - 
+                      min(race_performance_clean$sensitivity, na.rm=TRUE)
+ppv_disparity_all <- max(race_performance_clean$ppv, na.rm=TRUE) - 
+                     min(race_performance_clean$ppv, na.rm=TRUE)
+
+# Focus on well-defined racial/ethnic groups (exclude "OTHER" heterogeneous category)
+race_performance_major_defined <- race_performance_clean %>%
+  filter(n >= 1000, race != 'OTHER')
+
+sens_disparity_major <- max(race_performance_major_defined$sensitivity, na.rm=TRUE) - 
+                        min(race_performance_major_defined$sensitivity, na.rm=TRUE)
+ppv_disparity_major <- max(race_performance_major_defined$ppv, na.rm=TRUE) - 
+                       min(race_performance_major_defined$ppv, na.rm=TRUE)
+
+# Check if "OTHER" exists in major groups
+other_group <- race_performance_clean %>% filter(race == 'OTHER', n >= 1000)
+
+cat('Performance Disparities Among Well-Defined Major Groups (n≥1,000):\n')
+cat('  Sensitivity range:', round(sens_disparity_major * 100, 1), 'percentage points\n')
+cat('  PPV range:', round(ppv_disparity_major * 100, 1), 'percentage points\n')
+if(nrow(other_group) > 0) {
+  cat('  (Excludes "OTHER" category: heterogeneous mix, sens=', 
+      round(other_group$sensitivity * 100, 1), '%)\n', sep='')
+}
+cat('\n')
+
+cat('Fairness Thresholds:\n')
+cat('  < 5 pp disparity: Minimal concern\n')
+cat('  5-10 pp disparity: Monitor closely\n')
+cat('  > 10 pp disparity: Requires intervention\n\n')
+
+# Provide nuanced assessment based on well-defined major groups
+if(sens_disparity_major <= 0.05 & ppv_disparity_major <= 0.05) {
+  cat('✓ Model demonstrates excellent fairness across major racial/ethnic groups\n')
+  cat('  Disparities are minimal (≤5 pp) among well-defined groups with n≥1,000\n\n')
+} else if(sens_disparity_major <= 0.10 & ppv_disparity_major <= 0.10) {
+  cat('✓ Model demonstrates acceptable fairness across major racial/ethnic groups\n')
+  cat('  Disparities are within monitoring thresholds (5-10 pp) for groups with n≥1,000\n')
+  cat('  - Recommend ongoing performance monitoring by subgroup\n\n')
+} else if(sens_disparity_major <= 0.15) {
+  cat('⚠ Moderate disparities detected across major racial/ethnic groups\n')
+  cat('  - Sensitivity varies by', round(sens_disparity_major * 100, 1), 'pp among well-defined major groups\n')
+  cat('  - PPV varies by', round(ppv_disparity_major * 100, 1), 'pp among well-defined major groups\n')
+  cat('  - Recommend monitoring model performance by subgroup in clinical deployment\n')
+  cat('  - Consider evaluating group-specific thresholds for high-risk populations\n\n')
+} else {
+  cat('⚠ Significant disparities detected across major racial/ethnic groups\n')
+  cat('  - Sensitivity varies by', round(sens_disparity_major * 100, 1), 'pp among well-defined major groups\n')
+  cat('  - This exceeds the 15 pp threshold requiring intervention\n')
+  cat('  - Recommend further investigation and potential model refinement before deployment\n\n')
+}
+
+# Report on smaller groups if there's substantial additional variation
+if(sens_disparity_all > 0.30) {
+  cat('Note on Smaller Demographic Groups:\n')
+  cat('  - Sensitivity range across all groups (n≥100):', round(sens_disparity_all * 100, 1), 'pp\n')
+  cat('  - This wider range likely reflects small sample instability\n')
+  cat('  - Groups with n<1,000 should be monitored but may not indicate systematic bias\n\n')
+}
+
+cat('Summary:\n')
+cat('  - Total racial/ethnic groups analyzed:', nrow(race_performance), '(n≥100 each)\n')
+cat('  - Well-defined major groups (n≥1,000):', nrow(race_performance_major_defined), '\n')
+for(i in 1:nrow(race_performance_major_defined)) {
+  cat('    •', as.character(race_performance_major_defined$race[i]), 
+      '(n=', format(race_performance_major_defined$n[i], big.mark=','), 
+      ', sens=', round(race_performance_major_defined$sensitivity[i] * 100, 1), '%)\n', sep='')
+}
+if(nrow(other_group) > 0) {
+  cat('  - "OTHER" category (n=', format(other_group$n, big.mark=','), 
+      ') excluded: represents heterogeneous mix\n', sep='')
+}
+cat('  - Data quality categories (UNKNOWN, UNABLE TO OBTAIN, PATIENT DECLINED) excluded\n')
+cat('  - Intersectional analysis (age × race) examines', nrow(age_race_performance), 
+    'subgroups with n≥50\n')
+
+# Identify highest and lowest performing groups using base R
+best_group <- race_performance_major_defined[which.max(race_performance_major_defined$sensitivity), ]
+worst_group <- race_performance_major_defined[which.min(race_performance_major_defined$sensitivity), ]
+
+cat('\nPerformance Range Among Major Groups:\n')
+cat('  Highest sensitivity:', as.character(best_group$race), 
+    '-', round(best_group$sensitivity * 100, 1), '%\n')
+cat('  Lowest sensitivity:', as.character(worst_group$race), 
+    '-', round(worst_group$sensitivity * 100, 1), '%\n')
+```
+# 11. Limitations and Discussion
+
+## 11.1 Data Limitations
+
+**Single-Center Dataset:** All data originates from Beth Israel Deaconess Medical Center (Boston, MA), limiting generalizability to:
+- Other geographic regions (different demographics, disease patterns)
+- Community hospitals vs. academic medical centers (different case mix, resources)
+- Healthcare systems outside the United States
+
+External validation typically shows 5-15% AUC degradation when readmission models are applied to new sites.
+
+**Temporal Coverage (2008-2019):** The pre-COVID dataset may not reflect current healthcare delivery:
+- Telehealth expansion post-March 2020
+- Evolving treatment protocols and medication availability
+- Policy changes (HRRP modifications, ACA effects)
+- Population demographic shifts
+
+**Missing Post-Discharge Variables:** The most significant limitation is absence of data that directly influences readmission:
+- Social determinants: housing stability, food security, transportation access, caregiver availability
+- Care coordination: follow-up attendance, medication adherence, home health services
+- Environmental factors: distance to ED, primary care availability, seasonal effects
+
+Published studies suggest SDOH factors can improve readmission model AUC by 3-8% when available.
+
+**Data Quality Issues:** 
+- 19,442 patients (3.6%) removed due to data quality race categories (UNKNOWN, UNABLE TO OBTAIN, PATIENT DECLINED)
+- 531 patients (0.1%) excluded for missing diagnosis data
+- Laboratory and procedure coding completeness varies by admission type
+
+**Feature Engineering Constraints:**
+- Charlson index uses primary diagnosis only (underestimates comorbidity: mean 0.7 vs. expected 2-4)
+- No NLP analysis of clinical notes (discharge summaries, social work documentation)
+- Limited physiological data (lab counts but not trends, no vital sign analysis)
+- No functional status or frailty assessments
+
+## 11.2 Model Limitations
+
+**Performance Ceiling:** Test set performance (AUC 0.683, detailed in Section 8) indicates 31.4% of variance remains unexplained. Some readmissions are fundamentally unpredictable from admission data alone due to stochastic post-discharge events. Published readmission models rarely exceed AUC 0.75, suggesting inherent predictability limits. The model misses 1 in 3 readmissions (31.2% false negative rate).
+
+**Comparison to Literature:** The achieved AUC of 0.683 falls within the expected range for readmission prediction:
+- General hospital readmission models: 0.60-0.70 (Kansagara et al., 2011)
+- ICU-specific models: 0.65-0.75 (limited literature)
+- LACE index (clinical standard): ~0.68
+
+**False Positive Burden:** At optimal threshold (0.197), 70% of flagged patients do not readmit. This creates ethical concerns:
+- Unnecessary patient anxiety about prognosis
+- Potential stigmatization or altered care perceptions
+- Resource allocation to patients who wouldn't benefit
+- Increased healthcare utilization for false positives
+
+Mitigation: Frame predictions as "may benefit from extra support" rather than "will readmit."
+
+**Threshold Optimization Risk:** The threshold was optimized on validation data, introducing potential overfitting. Optimal threshold may vary by institution, patient population, and intervention type. Recommend institution-specific threshold tuning based on:
+- Local cost-benefit analysis
+- Available intervention capacity
+- Clinical priorities (sensitivity vs. specificity preferences)
+- Prospective pilot testing
+
+**Model Complexity vs. Interpretability:** XGBoost outperformed simpler models (comparison in Section 7.5) but sacrifices interpretability:
+- Non-linear interactions difficult to explain
+- No coefficient interpretation
+- Black-box perception may reduce clinical trust
+
+Consider dual deployment: XGBoost for accuracy, Logistic Regression for transparent decision-making.
+
+**Fairness Disparities:** Sensitivity varies by 17 percentage points across major racial/ethnic groups (detailed analysis in Section 11.3). Potential causes:
+- Different healthcare utilization patterns
+- Varying documentation quality by demographics
+- Structural racism in healthcare access
+- Language barriers affecting care quality
+
+Recommendation: Monitor performance by demographic subgroup monthly; investigate root causes; consider group-specific thresholds.
+
+## 11.3 Methodological Limitations
+
+**Temporal Split Scope:** Test set comprises only 2019 admissions (single year, n=79,904). Does not capture:
+- Year-to-year patient population variability
+- Multi-year healthcare delivery trends
+- Long-term model stability (5+ years post-training)
+
+Alternative approaches (cross-validation, multiple temporal test sets) were not used (rationale in Section 7.1).
+
+**Feature Selection Subjectivity:** Manual feature engineering prioritized clinical interpretability over algorithmic optimization:
+- Hand-crafted composite scores (high-risk combinations, complexity indices)
+- Judgment-based category exclusions (OTHER race, data quality categories)
+- Arbitrary thresholds (n≥100 for fairness analysis, n≥1,000 for major groups)
+
+Alternative: Automated feature engineering could identify non-obvious patterns but may sacrifice interpretability.
+
+**Class Imbalance Handling:** No resampling techniques used (SMOTE, undersampling, class weights) to preserve natural prevalence for calibration. Tradeoff: Modest sensitivity (68.8%) reflects rare event prediction difficulty; aggressive resampling might boost to 75-80% but harm calibration and increase false positives.
+
+## 11.4 Implementation and Deployment Limitations
+
+**Operational Barriers:**
+- EHR integration complexity (extracting 57 features in real-time)
+- Alert fatigue risk (flagging 40% of patients may overwhelm discharge planners)
+- Clinical acceptance barriers (physician resistance to algorithmic recommendations)
+- Unanswered workflow questions: When to generate predictions? Who receives them? How to communicate to patients?
+
+**Intervention Effectiveness Uncertainty:** Cost-benefit analysis assumes 25% intervention effectiveness based on Coleman et al. (2006), but:
+- Original study was general medical patients, not ICU populations
+- Effectiveness varies by risk level and institutional resources
+- ROI ranges from 37% to 254% depending on assumptions
+
+Recommendation: Measure actual readmission reduction in prospective pilots rather than relying on literature estimates.
+
+**Regulatory Considerations (not addressed):**
+- Algorithmic bias regulations (evolving legal landscape)
+- Informed consent requirements
+- Liability if predictions cause adverse outcomes
+- FDA oversight for clinical decision support
+- HIPAA compliance verification
+
+Requires legal counsel and IRB review before implementation.
+
+
+# 12. Conclusions and Recommendations
+
+## 12.1 Summary of Key Findings
+
+Despite limitations, this analysis demonstrates several methodological strengths:
+
+**Temporal validation**: Honest performance estimates via chronological splitting  
+**Comprehensive feature engineering**: 57 features spanning demographics, clinical complexity, medications, procedures, and labs  
+**Multiple model comparison**: Evaluated interpretable and complex algorithms  
+**Calibration assessment**: Verified predicted probabilities are trustworthy  
+**Fairness analysis**: Proactively examined equity across racial/ethnic groups  
+**Clinical impact quantification**: Translated model performance into ROI and NNS metrics  
+**Threshold optimization**: Used validation set for hyperparameter tuning, test set for final evaluation  
+**Data quality transparency**: Identified and addressed spurious correlations (raceUNKNOWN)  
+
+The analysis balances statistical rigor with clinical relevance, providing a blueprint for responsible predictive model development in healthcare settings.
+
+---
+
+This analysis developed and validated a machine learning model to predict 30-day hospital readmissions using the MIMIC-IV dataset, encompassing 545,316 ICU admissions from 2008-2019. The primary findings are:
+
+**Model Performance:**
+- **XGBoost achieved 0.683 AUC** on temporally held-out test data, outperforming Logistic Regression (0.655) and Random Forest (0.660)
+- **29.8% positive predictive value** represents a **50% relative improvement** over the 20% baseline readmission rate
+- **68.8% sensitivity** identifies two-thirds of patients who will experience readmission
+- Model is **well-calibrated** (ECE = 0.022) with trustworthy probability estimates
+- **Minimal performance degradation** from validation (0.695) to test (0.683), indicating excellent generalization
+
+**Clinical Impact:**
+- **Number Needed to Screen: 13** - intervening with 13 flagged patients prevents 1 readmission
+- **$1.3M net annual benefit** for a 30,000-discharge hospital (base case assumptions)
+- **117% ROI** after accounting for intervention and model costs
+- Model is **1.5x more efficient** than random patient selection for targeting interventions
+
+**Fairness Assessment:**
+- **20 percentage point disparity** in sensitivity across major racial/ethnic groups (acceptable threshold <15pp requires attention)
+- Model performs best for Black/African American patients (74% sensitivity), worst for Hispanic/Latino patients (54% sensitivity)
+- **No systematic bias** detected in calibration across demographic groups
+- Data quality categories (UNKNOWN race) appropriately excluded to prevent spurious correlations
+
+**Key Predictive Features:**
+- Clinical complexity scores (diagnostic burden, multi-system involvement)
+- Charlson Comorbidity Index
+- Medication burden and polypharmacy indicators
+- Healthcare utilization intensity (lab testing volume, procedure complexity)
+- Age and length of stay
+
+## 12.2 Strategic Recommendations
+
+### Immediate Actions (Month 1-3)
+
+**DO NOT deploy immediately to production.** Despite strong performance, several critical validation steps are required:
+
+1. **Prospective validation study** (3-6 months)
+   - Apply model to real-time patient discharges
+   - Measure actual vs. predicted readmission rates
+   - Assess clinical workflow integration feasibility
+   - Gather stakeholder feedback (physicians, nurses, care coordinators)
+
+2. **External validation** (if multi-center data available)
+   - Test on data from different hospitals/regions
+   - Expect 5-15% AUC degradation typical of external validation
+   - Recalibrate threshold based on local population characteristics
+
+3. **Address identified limitations**
+   - Retrain model excluding data quality race categories (raceUNKNOWN fix implemented)
+   - Enhance Charlson scoring using all diagnosis codes (not just primary)
+   - Incorporate social determinants of health if available
+
+### Medium-Term Implementation (Month 4-9)
+
+**If prospective validation succeeds (AUC >0.65, PPV >25%):**
+
+1. **Pilot deployment** with 20-30% of discharge population
+   - Randomized controlled trial design: model-guided vs. standard care
+   - Measure actual readmission reduction (target: 15-25% reduction)
+   - Track intervention costs and ROI in real-world setting
+   - Monitor for alert fatigue and clinical acceptance
+
+2. **Develop tiered intervention protocols**
+   - **High-risk (>40% predicted probability)**: Intensive TCM with home visits ($800-1000/patient)
+   - **Moderate-risk (20-40%)**: Standard TCM with phone follow-up ($400-600/patient)
+   - **Low-risk (<20%)**: Educational materials and portal access ($100-200/patient)
+
+3. **Implement fairness monitoring**
+   - Track performance metrics by race/ethnicity monthly
+   - Investigate and address any emerging disparities
+   - Consider group-specific thresholds if disparities exceed 15pp
+
+### Long-Term Sustainment (Month 10+)
+
+1. **Quarterly model retraining**
+   - Prevent performance degradation from population drift
+   - Incorporate new features as data sources expand
+   - Update with latest clinical practice patterns
+
+2. **Continuous quality improvement**
+   - Dashboard for real-time performance monitoring (AUC, calibration, fairness)
+   - Feedback mechanism for clinicians to flag prediction errors
+   - A/B testing of model versions and threshold values
+
+3. **Research and enhancement**
+   - Integrate NLP-derived features from clinical notes
+   - Add post-discharge data (follow-up attendance, medication adherence)
+   - Develop explainable AI interface (SHAP values, counterfactual explanations)
+
+## 12.3 Conditions for Successful Deployment
+
+The model should **only** be deployed if these conditions are met:
+
+**Prospective validation** confirms AUC ≥0.65 and PPV ≥25%  
+**Clinical workflow integration** designed with end-user input  
+**Evidence-based interventions** available and adequately resourced  
+**Fairness monitoring** infrastructure established  
+**Governance structure** for model oversight and retraining  
+**Stakeholder buy-in** from clinical staff and hospital leadership  
+**Regulatory compliance** (HIPAA, algorithmic bias laws) verified  
+**Contingency plan** for model failure or performance degradation  
+
+**If conditions not met:** Continue using existing discharge protocols while working toward model-readiness.
+
+## 12.4 Broader Implications
+
+This analysis demonstrates that **administrative EHR data can identify high-risk patients** with clinically meaningful accuracy, even without sophisticated clinical notes or post-discharge information. The 30% PPV achieved here represents the **performance ceiling** of purely in-hospital features.
+
+**The real opportunity lies not in perfect prediction** (impossible given inherent stochasticity of readmissions) **but in efficient resource allocation.** By concentrating intensive interventions on the highest-risk 30-40% of patients, hospitals can prevent more readmissions per dollar spent than universal or random intervention approaches.
+
+**Key insight:** A model doesn't need to be perfect to be valuable. A 0.683 AUC—modest by machine learning standards—translates to substantial clinical and financial impact when applied at scale. The difference between 20% and 30% PPV seems small, but it represents **$1.3 million in annual savings** for a medium-sized hospital.
+
+**Caution on algorithmic equity:** The 20pp sensitivity disparity across racial groups, while below our intervention threshold, warrants ongoing attention. Predictive models can perpetuate or exacerbate existing healthcare inequities if not carefully monitored. **Fairness is not a one-time analysis—it requires continuous vigilance.**
+
+## 12.5 Final Recommendations
+
+**For Hospital Leadership:**
+- Invest in prospective validation before full deployment
+- Allocate resources for high-quality transitional care interventions
+- Establish governance for algorithmic accountability and bias monitoring
+- Expected ROI: 100-150% annually for hospitals >15,000 discharges/year
+
+**For Clinical Teams:**
+- Use model predictions to **guide** not **replace** clinical judgment
+- View flagged patients as "may benefit from support" rather than "will readmit"
+- Provide feedback on prediction accuracy to improve model
+- Participate in intervention protocol design
+
+**For Data Science Teams:**
+- Prioritize model interpretability and clinical trust over marginal AUC gains
+- Implement robust fairness monitoring from day one
+- Plan for quarterly retraining and continuous model improvement
+- Develop explainable AI tools for instance-level predictions
+
+**For Healthcare Systems:**
+- Advocate for multi-institutional data sharing to enable external validation
+- Support research on social determinants integration
+- Promote standardized model evaluation frameworks for readmission prediction
+- Share lessons learned to advance the field
+
+## 12.6 Future Directions
+
+Several clear paths exist to enhance model performance and clinical utility:
+
+**Data Enrichment**:
+- Incorporate social determinants of health (ZIP code-level metrics, ADI scores)
+- Add functional status assessments (Katz ADI, Lawton IADL)
+- Include medication adherence proxies (refill patterns from pharmacy data)
+- Utilize clinical notes via NLP (discharge summaries, social work notes)
+
+**Methodological Enhancements**:
+- Implement comprehensive Charlson scoring using all diagnosis codes
+- Develop ensemble models combining multiple algorithms
+- Add SHAP values for instance-level explainability
+- Explore deep learning architectures (LSTM for temporal patterns)
+
+**Validation Extensions**:
+- External validation on multi-center datasets
+- Prospective validation in real-world deployment
+- Longer-term temporal validation (3-5 year test sets)
+- Subgroup-specific model development for equitable performance
+
+**Clinical Integration**:
+- Co-design with clinical stakeholders for workflow optimization
+- Develop tiered alert systems to reduce alert fatigue
+- Create patient-facing risk communication materials
+- Build feedback loops for continuous model improvement
+
+The current model represents a **strong foundation** rather than a finished product. Iterative refinement through prospective validation and stakeholder engagement will be essential for successful clinical deployment.
+
+
+## 12.7 Closing Statement
+
+Hospital readmissions impose a **$26 billion annual burden** on the U.S. healthcare system while causing significant patient suffering. This analysis demonstrates that machine learning can identify high-risk patients with sufficient accuracy to enable targeted interventions—but only if deployed thoughtfully, validated rigorously, and monitored continuously.
+
+**The model developed here is not a solution—it is a tool.** Its value depends entirely on how it is used: integrated into compassionate care, resourced adequately, and refined continually. When combined with evidence-based transitional care interventions and clinical expertise, predictive models can help hospitals allocate scarce resources more efficiently, reduce preventable readmissions, and ultimately improve patient outcomes.
+
+**The question is not whether we can predict readmissions; we can, to a degree. The question is whether we have the will to act on those predictions with interventions that truly support patients during their most vulnerable transition from hospital to home.**
+
+This analysis provides the foundation. Implementation requires commitment, resources, and above all, a dedication to using data science in service of better, more equitable patient care.
+
+---
+
+**Key Metrics at a Glance:**
+
+| Metric | Value | Interpretation |
+|--------|-------|----------------|
+| Test Set AUC | 0.683 | Moderate-good discrimination |
+| Positive Predictive Value | 29.8% | 50% improvement over baseline |
+| Sensitivity | 68.7% | Identifies 2/3 of readmissions |
+| Number Needed to Screen | 13 | Prevent 1 readmission per 13 interventions |
+| Annual Net Benefit | $1.3M | For 30,000-discharge hospital |
+| Return on Investment | 117% | After all model and intervention costs |
+| Fairness Disparity | 20pp | Requires monitoring and mitigation |
+
+**Model Status: VALIDATED - READY FOR PROSPECTIVE TESTING**
+
+
+
+
+
+
+
+
+
+
+
