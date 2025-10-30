@@ -1,0 +1,22 @@
+# Data files (MIMIC-IV requires credentialed access)
+Data/
+*.csv
+*.csv.gz
+
+# Large video files (hosted on YouTube)
+*.mp4
+*.mov
+*.avi
+
+# R session files
+.RData
+.RDataTmp
+.Rhistory
+.venv/
+
+# macOS
+.DS_Store
+
+# R specific
+*.Rproj
+.Rproj.user/
