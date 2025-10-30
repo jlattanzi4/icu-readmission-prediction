@@ -23,9 +23,25 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
                       fig.width = 10, fig.height = 6, fig.align = 'center')
+
+# Load kableExtra for better tables
+library(kableExtra)
+
+# Create custom table styling function
+nice_table <- function(data, caption = NULL, full_width = TRUE) {
+  nice_table(data, caption = caption, format = "html", escape = FALSE) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+      full_width = full_width,
+      position = "center",
+      font_size = 14
+    ) %>%
+    row_spec(0, bold = TRUE, color = "white", background = "#2563eb")
+}
 ```
 
-<div class="hero-banner">
+```{r hero-banner, echo=FALSE, results='asis'}
+cat('<div class="hero-banner">
   <h1>Who Comes Back?</h1>
   <div class="subtitle">Machine Learning for ICU Readmission Prediction</div>
   <div class="key-metrics">
@@ -46,24 +62,29 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
       <span class="metric-label">Sensitivity</span>
     </div>
   </div>
-</div>
+</div>')
+```
 
-<div class="exec-summary">
+```{r exec-summary, echo=FALSE, results='asis'}
+cat('<div class="exec-summary">
   <h3>🎯 Executive Summary</h3>
 
-**The Challenge:** Despite $26 billion in annual readmission costs, predicting which ICU patients will return within 30 days remains unsolved.
+<p><strong>The Challenge:</strong> Despite $26 billion in annual readmission costs, predicting which ICU patients will return within 30 days remains unsolved.</p>
 
-**The Solution:** Machine learning model using 545,316 hospital admissions, 150M+ data points, and 57 engineered features.
+<p><strong>The Solution:</strong> Machine learning model using 545,316 hospital admissions, 150M+ data points, and 57 engineered features.</p>
 
-**Key Results:**
+<p><strong>Key Results:</strong></p>
 
-- ✅ **0.683 AUC** — Correctly identifies 7 of 10 readmissions (49% better than baseline)
-- ✅ **$17.25M annual value** — Net benefit for large academic hospitals
-- ✅ **Efficient targeting** — Screen only 13 patients to prevent one readmission
-- ✅ **Smart stratification** — Top 33% of patients contain 52.5% of readmissions
+<ul>
+<li>✅ <strong>0.683 AUC</strong> — Correctly identifies 7 of 10 readmissions (49% better than baseline)</li>
+<li>✅ <strong>$17.25M annual value</strong> — Net benefit for large academic hospitals</li>
+<li>✅ <strong>Efficient targeting</strong> — Screen only 13 patients to prevent one readmission</li>
+<li>✅ <strong>Smart stratification</strong> — Top 33% of patients contain 52.5% of readmissions</li>
+</ul>
 
-**Impact:** Enables hospitals to target high-risk patients for early intervention, reducing costly readmissions while optimizing resource allocation.
-</div>
+<p><strong>Impact:</strong> Enables hospitals to target high-risk patients for early intervention, reducing costly readmissions while optimizing resource allocation.</p>
+</div>')
+```
 
 # 1. Introduction
 
@@ -72,6 +93,12 @@ Hospital readmissions represent a critical challenge in healthcare, with readmis
 This analysis aims to develop a predictive model for ICU readmissions using the MIMIC-IV dataset, focusing on identifying patients at high risk for readmission within 30 days of discharge.
 
 # 2. Data Loading and Setup
+
+## 2.1 Data Source: MIMIC-IV
+
+The Medical Information Mart for Intensive Care (MIMIC-IV) is a large, freely-available database comprising de-identified health data from patients admitted to the Beth Israel Deaconess Medical Center between 2008-2019. This analysis uses six core data tables to construct a comprehensive view of patient trajectories through the ICU system.
+
+**Why MIMIC-IV?** This dataset provides the clinical depth and scale necessary for developing robust readmission prediction models, with detailed information on diagnoses, medications, procedures, and laboratory results for over 500,000 hospital admissions.
 
 ```{r libraries}
 # Load required libraries
@@ -118,10 +145,16 @@ data_summary = data.frame(
   Columns = c(ncol(admissions), ncol(patients), ncol(diagnoses), ncol(prescriptions), ncol(procedures), ncol(labevents))
 )
 
-kable(data_summary, caption = 'MIMIC-IV Dataset Overview')
+nice_table(data_summary, caption = 'MIMIC-IV Dataset Overview')
 ```
 
+**Data Scale:** The table above shows the massive scale of clinical data available for this analysis. With over 545,000 admissions and 150+ million laboratory test results, we have rich longitudinal information to identify patterns associated with readmission risk. Each data table captures a different dimension of the patient's clinical journey—from diagnoses and medications to procedures and lab results.
+
 # 3. Data Preprocessing and Readmission Definition
+
+## 3.1 Overview
+
+Before building predictive models, we must carefully define our target variable (30-day readmission) and prepare our data for analysis. This section details the preprocessing steps taken to create a clean, analysis-ready dataset while avoiding common pitfalls like data leakage and temporal inconsistencies.
 
 ## 3.1 Admission Data Preprocessing
 
@@ -176,7 +209,7 @@ summary_table = data.frame(
             round(readmit_summary$readmission_rate, 2))
 )
 
-kable(summary_table, caption = '30-Day Readmission Summary Statistics')
+nice_table(summary_table, caption = '30-Day Readmission Summary Statistics')
 
 cat('Eligible discharges for readmission analysis:', nrow(readmit_eligible), '\n')
 ```
@@ -203,7 +236,7 @@ age_stats = analysis_data %>%
   ) %>%
   mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
 
-kable(age_stats[, c('readmission_status', 'count', 'mean_age', 'median_age', 'sd_age')],
+nice_table(age_stats[, c('readmission_status', 'count', 'mean_age', 'median_age', 'sd_age')],
       caption = 'Age Statistics by Readmission Status',
       col.names = c('Readmission Status', 'Count', 'Mean Age', 'Median Age', 'SD Age'))
 
@@ -220,7 +253,7 @@ los_stats <- analysis_data %>%
   ) %>%
   mutate(readmission_status = ifelse(readmit_30day == 1, "Readmitted", "Not Readmitted"))
 
-kable(los_stats[, c("readmission_status", "count", "mean_los", "median_los", "q75_los")], 
+nice_table(los_stats[, c("readmission_status", "count", "mean_los", "median_los", "q75_los")], 
       caption = "Length of Stay Statistics by Readmission Status",
       col.names = c("Readmission Status", "Count", "Mean LOS", "Median LOS", "75th Percentile LOS"))
 ```
@@ -298,7 +331,7 @@ category_summary <- diagnoses_enhanced %>%
   ) %>%
   arrange(desc(total_cases))
 
-kable(category_summary, caption = 'Diagnosis Distribution by Clinical Category',
+nice_table(category_summary, caption = 'Diagnosis Distribution by Clinical Category',
       col.names = c('Clinical Category', 'Total Cases', 'Unique Codes', 'Unique Patients', 
                    'Unique Admissions', '% of Total'))
 
@@ -321,7 +354,7 @@ top_diagnoses_enhanced <- head(icd_summary_enhanced, 15) %>%
                               diagnosis_name)
   )
 
-kable(top_diagnoses_enhanced[, c('icd_code', 'icd_version', 'diagnosis_display', 'diagnosis_category', 'frequency', 'unique_patients')], 
+nice_table(top_diagnoses_enhanced[, c('icd_code', 'icd_version', 'diagnosis_display', 'diagnosis_category', 'frequency', 'unique_patients')], 
       caption = 'Top 15 Most Frequent Diagnoses with Clinical Categories',
       col.names = c('ICD Code', 'Version', 'Diagnosis', 'Category', 'Frequency', 'Unique Patients'))
 
@@ -358,7 +391,7 @@ diagnoses_summary_table = data.frame(
             diagnoses_burden_table$mean_categories)
 )
 
-kable(diagnoses_summary_table, caption = 'Enhanced Diagnoses Burden per Admission')
+nice_table(diagnoses_summary_table, caption = 'Enhanced Diagnoses Burden per Admission')
 
 # Merge enhanced diagnoses data with analysis dataset
 admission_diagnoses_enhanced = diagnoses_enhanced %>%
@@ -399,7 +432,7 @@ high_risk_table <- data.frame(
                        high_risk_conditions$overall_readmit_rate)
 )
 
-kable(high_risk_table, caption = 'Readmission Rates by High-Risk Conditions',
+nice_table(high_risk_table, caption = 'Readmission Rates by High-Risk Conditions',
       col.names = c('Condition', 'Readmission Rate (%)'))
 
 # Primary diagnosis category analysis
@@ -414,7 +447,7 @@ primary_dx_category_analysis = analysis_data %>%
   filter(total_cases >= 20 & !is.na(primary_diagnosis_category)) %>%
   arrange(desc(readmission_rate))
 
-kable(primary_dx_category_analysis, caption = 'Readmission Rates by Primary Diagnosis Category',
+nice_table(primary_dx_category_analysis, caption = 'Readmission Rates by Primary Diagnosis Category',
       col.names = c('Primary Diagnosis Category', 'Total Cases', 'Readmissions', 'Readmission Rate (%)'))
 
 # Enhanced diagnosis burden by readmission status
@@ -429,7 +462,7 @@ diagnosis_burden_enhanced = analysis_data %>%
   ) %>%
   mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
 
-kable(diagnosis_burden_enhanced[, c('readmission_status', 'mean_diagnoses', 'median_diagnoses', 'mean_categories', 'q75_diagnoses')],
+nice_table(diagnosis_burden_enhanced[, c('readmission_status', 'mean_diagnoses', 'median_diagnoses', 'mean_categories', 'q75_diagnoses')],
       caption = 'Enhanced Diagnosis Burden by Readmission Status',
       col.names = c('Readmission Status', 'Mean Diagnoses', 'Median Diagnoses', 'Mean Categories', '75th Percentile'))
 ```
@@ -510,7 +543,7 @@ drug_category_summary <- prescriptions_enhanced %>%
   ) %>%
   arrange(desc(total_prescriptions))
 
-kable(drug_category_summary, caption = 'Prescription Distribution by Therapeutic Category',
+nice_table(drug_category_summary, caption = 'Prescription Distribution by Therapeutic Category',
       col.names = c('Therapeutic Category', 'Total Prescriptions', 'Unique Drugs', 
                    'Unique Patients', 'Unique Admissions', '% of Total'))
 
@@ -526,7 +559,7 @@ medication_summary_enhanced = prescriptions_enhanced %>%
   arrange(desc(frequency)) %>%
   top_n(20, wt = frequency)
 
-kable(medication_summary_enhanced, caption = 'Top 20 Medications by Frequency with Therapeutic Categories',
+nice_table(medication_summary_enhanced, caption = 'Top 20 Medications by Frequency with Therapeutic Categories',
       col.names = c('Medication', 'Therapeutic Category', 'Total Prescriptions', 'Unique Patients', 'Unique Admissions'))
 
 # Enhanced polypharmacy analysis with categories
@@ -569,7 +602,7 @@ polypharmacy_enhanced_table = data.frame(
             polypharmacy_enhanced_stats$mean_high_risk)
 )
 
-kable(polypharmacy_enhanced_table, caption = 'Enhanced Polypharmacy Metrics per Admission')
+nice_table(polypharmacy_enhanced_table, caption = 'Enhanced Polypharmacy Metrics per Admission')
 
 # Remove existing medication variables before joining
 analysis_data <- analysis_data %>%
@@ -610,7 +643,7 @@ med_risk_table <- data.frame(
                        high_risk_med_analysis$overall_readmit_rate)
 )
 
-kable(med_risk_table, caption = 'Readmission Rates by Medication Categories',
+nice_table(med_risk_table, caption = 'Readmission Rates by Medication Categories',
       col.names = c('Medication Category', 'Readmission Rate (%)'))
 
 # Enhanced prescription burden by readmission status
@@ -626,7 +659,7 @@ prescription_readmission_enhanced = analysis_data %>%
   ) %>%
   mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
 
-kable(prescription_readmission_enhanced[, c('readmission_status', 'mean_prescriptions', 'median_prescriptions', 'mean_categories', 'mean_high_risk')],
+nice_table(prescription_readmission_enhanced[, c('readmission_status', 'mean_prescriptions', 'median_prescriptions', 'mean_categories', 'mean_high_risk')],
       caption = 'Enhanced Prescription Burden by Readmission Status',
       col.names = c('Readmission Status', 'Mean Prescriptions', 'Median Prescriptions', 'Mean Categories', 'Mean High-Risk Meds'))
 ```
@@ -679,7 +712,7 @@ lab_burden_table = data.frame(
             lab_burden_stats$median_categories)
 )
 
-kable(lab_burden_table, caption = 'Laboratory Testing Burden per Admission')
+nice_table(lab_burden_table, caption = 'Laboratory Testing Burden per Admission')
 
 # Remove existing lab variables before joining (for reproducibility)
 analysis_data <- analysis_data %>%
@@ -711,7 +744,7 @@ lab_readmission_analysis = analysis_data %>%
   ) %>%
   mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
 
-kable(lab_readmission_analysis[, c('readmission_status', 'mean_lab_tests', 'median_lab_tests', 
+nice_table(lab_readmission_analysis[, c('readmission_status', 'mean_lab_tests', 'median_lab_tests', 
                                    'mean_categories', 'percent_with_labs')],
       caption = 'Laboratory Testing Burden by Readmission Status',
       col.names = c('Readmission Status', 'Mean Lab Tests', 'Median Lab Tests', 
@@ -775,7 +808,7 @@ lab_readmission_analysis = analysis_data %>%
   ) %>%
   mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
 
-kable(lab_readmission_analysis[, c('readmission_status', 'mean_lab_tests', 'median_lab_tests', 
+nice_table(lab_readmission_analysis[, c('readmission_status', 'mean_lab_tests', 'median_lab_tests', 
                                    'q75_lab_tests', 'percent_with_labs', 'mean_unique_types')],
       caption = 'Laboratory Testing Burden by Readmission Status',
       col.names = c('Readmission Status', 'Mean Lab Tests', 'Median Lab Tests', 
@@ -885,7 +918,7 @@ proc_category_summary <- procedures_enhanced %>%
   ) %>%
   arrange(desc(total_procedures))
 
-kable(proc_category_summary, caption = 'Procedure Distribution by Clinical Category',
+nice_table(proc_category_summary, caption = 'Procedure Distribution by Clinical Category',
       col.names = c('Clinical Category', 'Total Procedures', 'Unique Codes', 'Unique Patients', 
                    'Unique Admissions', '% of Total'))
 
@@ -909,7 +942,7 @@ top_procedures_enhanced <- head(procedure_summary_enhanced, 15) %>%
     risk_level = ifelse(high_risk_procedure, "High Risk", "Standard")
   )
 
-kable(top_procedures_enhanced[, c('icd_code', 'icd_version', 'procedure_display', 'procedure_category', 'risk_level', 'frequency')], 
+nice_table(top_procedures_enhanced[, c('icd_code', 'icd_version', 'procedure_display', 'procedure_category', 'risk_level', 'frequency')], 
       caption = 'Top 15 Most Frequent Procedures with Clinical Categories',
       col.names = c('ICD Code', 'Version', 'Procedure', 'Category', 'Risk Level', 'Frequency'))
 
@@ -953,7 +986,7 @@ procedure_burden_enhanced_table <- data.frame(
             procedure_burden_enhanced_stats$mean_invasive)
 )
 
-kable(procedure_burden_enhanced_table, caption = 'Enhanced Procedure Burden per Admission')
+nice_table(procedure_burden_enhanced_table, caption = 'Enhanced Procedure Burden per Admission')
 
 # Remove existing procedure variables before joining (for reproducibility)
 analysis_data <- analysis_data %>%
@@ -995,7 +1028,7 @@ proc_risk_table <- data.frame(
                        high_risk_proc_analysis$overall_readmit_rate)
 )
 
-kable(proc_risk_table, caption = 'Readmission Rates by Procedure Categories',
+nice_table(proc_risk_table, caption = 'Readmission Rates by Procedure Categories',
       col.names = c('Procedure Category', 'Readmission Rate (%)'))
 
 # Enhanced procedure burden by readmission status
@@ -1012,7 +1045,7 @@ procedure_readmission_enhanced = analysis_data %>%
   ) %>%
   mutate(readmission_status = ifelse(readmit_30day == 1, 'Readmitted', 'Not Readmitted'))
 
-kable(procedure_readmission_enhanced[, c('readmission_status', 'mean_procedures', 'median_procedures', 'mean_categories', 'mean_high_risk', 'mean_invasive')],
+nice_table(procedure_readmission_enhanced[, c('readmission_status', 'mean_procedures', 'median_procedures', 'mean_categories', 'mean_high_risk', 'mean_invasive')],
       caption = 'Enhanced Procedure Burden by Readmission Status',
       col.names = c('Readmission Status', 'Mean Procedures', 'Median Procedures', 'Mean Categories', 'Mean High-Risk', 'Mean Invasive'))
 ```
@@ -1106,7 +1139,7 @@ completeness_summary <- analysis_data %>%
   ) %>%
   arrange(desc(completeness_percent))
 
-kable(completeness_summary[, c('variable', 'complete_count', 'missing_count', 'completeness_percent', 'missing_percent')],
+nice_table(completeness_summary[, c('variable', 'complete_count', 'missing_count', 'completeness_percent', 'missing_percent')],
       caption = 'Data Completeness Summary for Key Variables',
       col.names = c('Variable', 'Complete Count', 'Missing Count', 'Completeness %', 'Missing %'))
 ```
@@ -1218,7 +1251,7 @@ charlson_summary_table = data.frame(
             charlson_stats$percent_high_risk)
 )
 
-kable(charlson_summary_table, caption = 'Charlson Comorbidity Index Summary')
+nice_table(charlson_summary_table, caption = 'Charlson Comorbidity Index Summary')
 
 # Charlson Readmission Analysis
 charlson_readmission = charlson_components %>%
@@ -1231,7 +1264,7 @@ charlson_readmission = charlson_components %>%
   ) %>%
   arrange(desc(readmission_rate))
 
-kable(charlson_readmission, caption = 'Readmission Rates by Charlson Comorbidity Category',
+nice_table(charlson_readmission, caption = 'Readmission Rates by Charlson Comorbidity Category',
       col.names = c('Charlson Category', 'Total Cases', 'Readmissions', 'Readmission Rate (%)'))
 
 # Update analysis_data with Charlson features
@@ -1322,7 +1355,7 @@ utilization_summary_table = data.frame(
             utilization_stats$high_risk_combo_percent)
 )
 
-kable(utilization_summary_table, caption = 'Healthcare Utilization Feature Summary')
+nice_table(utilization_summary_table, caption = 'Healthcare Utilization Feature Summary')
 
 # High-risk combination analysis
 risk_combo_analysis = utilization_features %>%
@@ -1335,7 +1368,7 @@ risk_combo_analysis = utilization_features %>%
   ) %>%
   arrange(desc(readmission_rate))
 
-kable(risk_combo_analysis, caption = 'Readmission Rates by High-Risk Combinations',
+nice_table(risk_combo_analysis, caption = 'Readmission Rates by High-Risk Combinations',
       col.names = c('Risk Combination', 'Total Cases', 'Readmissions', 'Readmission Rate (%)'))
 
 # Update analysis_data with utilization features
@@ -1414,7 +1447,7 @@ med_risk_summary_table = data.frame(
             med_risk_stats$high_risk_percent, med_risk_stats$elderly_polypharmacy_percent)
 )
 
-kable(med_risk_summary_table, caption = 'Medication Risk Feature Summary')
+nice_table(med_risk_summary_table, caption = 'Medication Risk Feature Summary')
 
 # Medication risk by readmission
 med_risk_readmission = medication_risk_features %>%
@@ -1427,7 +1460,7 @@ med_risk_readmission = medication_risk_features %>%
   ) %>%
   arrange(desc(readmission_rate))
 
-kable(med_risk_readmission, caption = 'Readmission Rates by Medication Risk Category',
+nice_table(med_risk_readmission, caption = 'Readmission Rates by Medication Risk Category',
       col.names = c('Medication Risk Category', 'Total Cases', 'Readmissions', 'Readmission Rate (%)'))
 
 # Update analysis_data with medication risk features
@@ -1530,7 +1563,7 @@ complexity_summary_table <- data.frame(
             complexity_stats$chronic_complex_percent)
 )
 
-kable(complexity_summary_table, caption = 'Clinical Complexity Feature Statistics')
+nice_table(complexity_summary_table, caption = 'Clinical Complexity Feature Statistics')
 
 # Complexity by readmission analysis
 complexity_readmission <- complexity_features %>%
@@ -1543,7 +1576,7 @@ complexity_readmission <- complexity_features %>%
   ) %>%
   arrange(desc(readmission_rate))
 
-kable(complexity_readmission, caption = 'Readmission Rates by Clinical Complexity Category',
+nice_table(complexity_readmission, caption = 'Readmission Rates by Clinical Complexity Category',
       col.names = c('Clinical Complexity Category', 'Total Cases', 'Readmissions', 'Readmission Rate (%)'))
 
 # Update analysis_data
@@ -1590,7 +1623,7 @@ na_check <- data.frame(
   )
 )
 
-kable(na_check, caption = 'NA Check for Key Modeling Features')
+nice_table(na_check, caption = 'NA Check for Key Modeling Features')
 
 # Update analysis_data for modeling
 analysis_data <- analysis_data_clean
@@ -1691,7 +1724,7 @@ split_summary <- data.frame(
   )
 )
 
-kable(split_summary, caption = 'Train/Validation/Test Split Summary',
+nice_table(split_summary, caption = 'Train/Validation/Test Split Summary',
       col.names = c('Dataset', 'N Patients', 'N Readmissions', 'Readmission Rate (%)', 
                     'Date Range Start', 'Date Range End'))
 ```
@@ -1835,7 +1868,7 @@ na_summary <- data.frame(
   )
 )
 
-kable(na_summary, caption = 'NA Summary in Modeling Datasets')
+nice_table(na_summary, caption = 'NA Summary in Modeling Datasets')
 ```
 
 ### Model Data Preparation Complete
@@ -1920,7 +1953,7 @@ logistic_metrics = data.frame(
 )
 rownames(logistic_metrics) <- NULL
 
-kable(logistic_metrics, caption = 'Logistic Regression Performance on Validation Set')
+nice_table(logistic_metrics, caption = 'Logistic Regression Performance on Validation Set')
 
 # Feature importance from logistic regression
 logistic_coef = coef(logistic_model, s = 'lambda.min')
@@ -1933,7 +1966,7 @@ logistic_coef_df = data.frame(
   arrange(desc(Abs_Coefficient)) %>%
   head(15)
 
-kable(logistic_coef_df, caption = 'Top 15 Features by Logistic Regression Coefficient Magnitude',
+nice_table(logistic_coef_df, caption = 'Top 15 Features by Logistic Regression Coefficient Magnitude',
       col.names = c('Feature', 'Coefficient', 'Absolute Coefficient'))
 
 # Visualize top features
@@ -2031,7 +2064,7 @@ rf_metrics = data.frame(
 
 rownames(rf_metrics) <- NULL
 
-kable(rf_metrics, caption = 'Random Forest Performance on Validation Set')
+nice_table(rf_metrics, caption = 'Random Forest Performance on Validation Set')
 
 # Feature Importance
 rf_importance = importance(rf_model)
@@ -2043,7 +2076,7 @@ rf_importance_df = data.frame(
   arrange(desc(MeanDecreaseGini)) %>%
   head(15)
 
-kable(rf_importance_df, caption = 'Top 15 Features by Random Forest Importance',
+nice_table(rf_importance_df, caption = 'Top 15 Features by Random Forest Importance',
       col.names = c('Feature', 'Mean Decrease in Accuracy', 'Mean Decrease in Gini'))
 
 # Visualize feature importance
@@ -2160,13 +2193,13 @@ xgb_metrics <- data.frame(
 )
 rownames(xgb_metrics) <- NULL
 
-kable(xgb_metrics, caption = 'XGBoost Performance on Validation Set')
+nice_table(xgb_metrics, caption = 'XGBoost Performance on Validation Set')
 
 # Feature Importance
 xgb_importance <- xgb.importance(model = xgb_model)
 xgb_importance_top15 <- head(xgb_importance, 15)
 
-kable(xgb_importance_top15[, c('Feature', 'Gain', 'Cover', 'Frequency')], 
+nice_table(xgb_importance_top15[, c('Feature', 'Gain', 'Cover', 'Frequency')], 
       caption = 'Top 15 Features by XGBoost Importance',
       col.names = c('Feature', 'Gain', 'Cover', 'Frequency'))
 
@@ -2229,7 +2262,7 @@ model_comparison <- data.frame(
   )
 )
 
-kable(model_comparison, caption = 'Model Performance Comparison on Validation Set')
+nice_table(model_comparison, caption = 'Model Performance Comparison on Validation Set')
 
 # ROC curve comparison
 plot(logistic_roc, col = 'blue', main = 'ROC Curves - Model Comparison (Validation Set)',
@@ -2352,7 +2385,7 @@ performance_summary = data.frame(
   )
 )
 
-kable(performance_summary,
+nice_table(performance_summary,
       caption = 'XGBoost Model Performance Across Datasets',
       col.names = c('Dataset', 'N Patients', 'Readmission Rate (%)', 'AUC', 
                     'Sensitivity', 'Specificity', 'PPV', 'Accuracy'))
@@ -2453,7 +2486,7 @@ cost_params <- data.frame(
   stringsAsFactors = FALSE
 )
 
-kable(cost_params, 
+nice_table(cost_params, 
       caption = 'Evidence-Based Cost Parameters for Impact Analysis',
       col.names = c('Parameter', 'Low Estimate', 'Base Estimate', 'High Estimate', 'Primary Source'),
       align = c('l', 'r', 'r', 'r', 'l'))
@@ -2479,7 +2512,7 @@ hospital_scenarios <- hospital_scenarios %>%
     ROI_Percent = (Net_Benefit / (Intervention_Costs + Model_Costs)) * 100
   )
 
-kable(hospital_scenarios[, c('Hospital_Size', 'Annual_Discharges', 'Readmissions_Prevented', 
+nice_table(hospital_scenarios[, c('Hospital_Size', 'Annual_Discharges', 'Readmissions_Prevented', 
                              'Cost_Savings', 'Net_Benefit', 'ROI_Percent')],
       caption = 'Financial Impact by Hospital Size (Base Case: $26k readmission cost, 25% intervention effectiveness)',
       col.names = c('Hospital Type', 'Annual Discharges', 'Readmissions Prevented', 
@@ -2624,7 +2657,7 @@ nns_summary <- data.frame(
   )
 )
 
-kable(nns_summary,
+nice_table(nns_summary,
       caption = 'Number Needed to Screen Analysis (Based on Test Set Performance and Coleman et al 2006)',
       col.names = c('Metric', 'Value', 'Clinical Interpretation'))
 ```
@@ -2694,7 +2727,7 @@ risk_stratification <- test_data_with_risk %>%
     )
   )
 
-kable(risk_stratification[, c('risk_tertile', 'n_patients', 'readmission_rate', 
+nice_table(risk_stratification[, c('risk_tertile', 'n_patients', 'readmission_rate', 
                               'pct_of_readmissions', 'recommended_intervention')],
       caption = 'Risk Stratification and Evidence-Based Intervention Recommendations',
       col.names = c('Risk Group', 'N Patients', 'Readmission Rate', 
@@ -2821,7 +2854,7 @@ comparison_table <- budget_scenarios %>%
          readmissions_prevented_per_1000_treated) %>%
   arrange(pct_treated, desc(net_benefit))
 
-kable(comparison_table,
+nice_table(comparison_table,
       caption = 'Model-Guided vs Random Selection Comparison (30,000 annual discharges)',
       col.names = c('Strategy', '% Treated', 'Readmissions Prevented',
                     'Net Benefit ($)', 'Prevented per 1,000 Treated'),
@@ -2945,7 +2978,7 @@ calibration_metrics = data.frame(
   )
 )
 
-kable(calibration_metrics,
+nice_table(calibration_metrics,
       caption = 'Model Calibration Metrics (Validation Set)',
       col.names = c('Model', 'Brier Score', 'Expected Calibration Error (ECE)', 'Calibration Quality'),
       digits = 4)
@@ -3180,7 +3213,7 @@ race_performance <- fairness_data %>%
   filter(n >= 100) %>%
   arrange(desc(n))
 
-kable(race_performance,
+nice_table(race_performance,
       caption = 'Model Performance by Race/Ethnicity (Groups with n≥100)',
       col.names = c('Race/Ethnicity', 'N', 'Actual Rate', 'Mean Pred Prob',
                     'Sensitivity', 'Specificity', 'PPV', 'NPV'),
