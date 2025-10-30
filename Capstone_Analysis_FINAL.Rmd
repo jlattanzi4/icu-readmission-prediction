@@ -29,7 +29,7 @@ library(kableExtra)
 
 # Create custom table styling function
 nice_table <- function(data, caption = NULL, full_width = TRUE) {
-  nice_table(data, caption = caption, format = "html", escape = FALSE) %>%
+  knitr::kable(data, caption = caption) %>%
     kable_styling(
       bootstrap_options = c("striped", "hover", "condensed", "responsive"),
       full_width = full_width,
