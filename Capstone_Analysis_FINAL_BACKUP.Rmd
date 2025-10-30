@@ -1,73 +1,22 @@
 ---
-title: "Who Comes Back? Machine Learning for ICU Readmission Prediction"
-subtitle: "Master of Science in Applied Data Science - Capstone Project"
-author: "Joseph Lattanzi | Bay Path University"
-date: "`r Sys.Date()`"
-output:
+title: "Capstone Analysis: Hospital Readmission Prediction"
+author: "Joseph Lattanzi"
+date: "2025-10-13"
+output: 
   rmdformats::readthedown:
     code_folding: hide
-    code_download: true
     highlight: kate
     toc_depth: 3
-    number_sections: false
-    self_contained: true
-    thumbnails: false
-    lightbox: true
-    gallery: true
-    css: custom_style.css
-    includes:
-      in_header: header.html
-      after_body: footer.html
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
-                      fig.width = 10, fig.height = 6, fig.align = 'center')
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      fig.width = 10, fig.height = 6)
 ```
-
-<div class="hero-banner">
-  <h1>Who Comes Back?</h1>
-  <div class="subtitle">Machine Learning for ICU Readmission Prediction</div>
-  <div class="key-metrics">
-    <div class="metric">
-      <span class="metric-value">0.683</span>
-      <span class="metric-label">AUC Score</span>
-    </div>
-    <div class="metric">
-      <span class="metric-value">$17.25M</span>
-      <span class="metric-label">Annual Net Benefit</span>
-    </div>
-    <div class="metric">
-      <span class="metric-value">280%</span>
-      <span class="metric-label">ROI</span>
-    </div>
-    <div class="metric">
-      <span class="metric-value">70%</span>
-      <span class="metric-label">Sensitivity</span>
-    </div>
-  </div>
-</div>
-
-<div class="exec-summary">
-  <h3>🎯 Executive Summary</h3>
-
-**The Challenge:** Despite $26 billion in annual readmission costs, predicting which ICU patients will return within 30 days remains unsolved.
-
-**The Solution:** Machine learning model using 545,316 hospital admissions, 150M+ data points, and 57 engineered features.
-
-**Key Results:**
-
-- ✅ **0.683 AUC** — Correctly identifies 7 of 10 readmissions (49% better than baseline)
-- ✅ **$17.25M annual value** — Net benefit for large academic hospitals
-- ✅ **Efficient targeting** — Screen only 13 patients to prevent one readmission
-- ✅ **Smart stratification** — Top 33% of patients contain 52.5% of readmissions
-
-**Impact:** Enables hospitals to target high-risk patients for early intervention, reducing costly readmissions while optimizing resource allocation.
-</div>
 
 # 1. Introduction
 
-Hospital readmissions represent a critical challenge in healthcare, with readmission rates remaining persistently high despite targeted interventions. Approximately 20% of Medicare beneficiaries experience readmission within 30 days, with average US hospital readmission rates of 14.67% across all conditions. Hospital readmissions cost approximately **$26 billion annually** in the United States.
+Hospital readmissions represent a critical challenge in healthcare, with readmission rates remaining persistently high despite targeted interventions. Approximately 20% of Medicare beneficiaries experience readmission within 30 days, with average US hospital readmission rates of 14.67% across all conditions. Hospital readmissions cost approximately $26 billion annually in the United States.
 
 This analysis aims to develop a predictive model for ICU readmissions using the MIMIC-IV dataset, focusing on identifying patients at high risk for readmission within 30 days of discharge.
 
