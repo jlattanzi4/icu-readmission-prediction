@@ -1,0 +1,198 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 ArialMT;\f1\froman\fcharset0 Times-Roman;\f2\fswiss\fcharset0 Arial-ItalicMT;
+}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;}
+{\*\expandedcolortbl;;\cssrgb\c0\c0\c0;}
+\margl1440\margr1440\vieww18540\viewh13500\viewkind0
+\deftab720
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Good [morning/afternoon]. My presentation asks: Who comes back? Can we predict which ICU patients will be readmitted within 30 days using machine learning? Over the next 40 minutes, I'll show you a complete data science pipeline\'97from 545,000 patients to actionable clinical insights.
+\f1\fs24 \
+\
+\
+
+\f0\fs29\fsmilli14667 $26 billion annual cost. 1 in 5 Medicare patients readmitted within 30 days. CMS tracks this and penalizes hospitals with high rates. Beyond money, this means patient suffering\'97more procedures, complications, mortality risk. ICU patients face even higher rates. Can we identify high-risk patients before discharge?
+\f1\fs24 \
+\
+\
+\pard\pardeftab720\sa320\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 My approach has four stages. Data: MIMIC-IV with 545,000 ICU admissions from 2008-2019, six interconnected tables. Features: I engineered 57 features capturing comorbidity burden, medication complexity, and healthcare utilization. Models: Three complementary approaches\'97logistic regression for interpretability, random forest for non-linear patterns, XGBoost for performance. Impact: I translated this into risk stratification, ROI analysis, and resource optimization. Models only matter if they can be deployed.
+\f1\fs24 \
+
+\f0\fs29\fsmilli14667 MIMIC-IV from Beth Israel Deaconess, 2008-2019. 380,000 patients, 500,000 admissions, 120 million lab measurements, 26 million prescriptions. Why MIMIC? It's comprehensive\'97the entire clinical picture. Granular\'97time-stamped events, not summaries. Validated\'97peer-reviewed, widely used. Realistic\'97real-world data with all its messiness. If it works here, it can work in practice.
+\f1\fs24 \
+\
+
+\f0\fs29\fsmilli14667 Six interconnected tables. Admissions is my anchor\'97500,000 encounters. Patients has demographics. Then clinical detail: 4.8 million diagnoses, 26 million prescriptions, 650,000 procedures, 120 million lab measurements. The challenge: how do I turn 120 million lab rows into patient-level features? My solution: aggregate complexity metrics. Instead of raw lab values, I compute 'total tests ordered' and 'test diversity'\'97proxies for monitoring intensity. Absence of tests is informative too. No cardiac enzymes drawn? Not a cardiac case.
+\f1\fs24 \
+\pard\pardeftab720\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\sa320\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 From six tables to one dataset. Link everything via patient and admission IDs. Filter to valid discharges\'97removed stays under a day or over a year. Calculate 30-day readmission by comparing discharge time to next admission.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Aggregate millions of events into patient-level features: medication count, therapeutic diversity, high-risk drug flags. Same for labs, procedures, diagnoses. Result: 545,316 eligible admissions with 57 features each, ready for machine learning.
+\f1\fs24 \
+\pard\pardeftab720\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\sa320\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 Our baseline: 20.03% readmitted within 30 days. That's 109,000 readmissions out of 545,000 discharges. Higher than the national 14.67%, matches Medicare's 20%. Makes sense\'97ICU patients are the sickest. This 20% baseline is critical. A model predicting 'no readmission' for everyone would be 80% accurate but useless. The challenge is identifying 
+\f2\i \strokec2 which
+\f0\i0 \strokec2  20% will return. That's the class imbalance problem we'll address.
+\f1\fs24 \
+\
+
+\f0\fs29\fsmilli14667 Who are these patients? Readmitted patients are older\'97median 67 vs 64. Longer ICU stays\'976.8 days vs 5.9. Emergency admissions have higher risk than elective procedures.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Not surprising findings, but they validate the data behaves as expected clinically. The question is whether comprehensive feature engineering can capture more nuanced patterns.\
+\
+\pard\pardeftab720\partightenfactor0
+\cf0 \strokec2 Readmitted patients are more complex across every dimension. Twenty percent more diagnoses 12 versus 10. Thirty-two percent more medications 29 versus 22, indicating severe polypharmacy. Most striking: 48% more lab tests\'9780 versus 54\'97reflecting greater diagnostic uncertainty and monitoring intensity.Procedures are similar, suggesting complexity isn't driven by surgical interventions but by medical complexity. This systematic pattern across all measures validates our feature engineering approach.
+\f1\fs24 \
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 This is messy, real-world data. Demographics 99% complete\'97excellent. Labs 96%, medications 92%\'97good. Diagnoses 85%, procedures 73%\'97acceptable but imperfect. Key insight: missingness is informative. No cardiac biomarkers? Not a cardiac case. Few procedures? Medical admission, not surgical. We made strategic exclusions: 19,442 patients with data quality issues in race field\'97these are collection failures. 531 with no diagnoses\'97likely errors. But we kept patients with missing procedures or labs because absence carries clinical meaning. If this model works with messy real-world data, it can work in practice.
+\f1\fs24 \
+\
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\sa320\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 From 150 million raw records to 57 predictive features across four categories. Comorbidity indices like Charlson score capture disease burden\'97our mean is 0.7, flagging heart failure, diabetes, COPD. Healthcare utilization measures medication count\'97average 26 prescriptions\'97lab diversity, procedure complexity. Medication risk includes polypharmacy flags and high-risk drug patterns like anticoagulants. Clinical complexity scores multi-system involvement with a mean of 9.3 on a scale from 3 to 58. These aren't raw clinical values\'97they're dengineered metrics capturing patient complexity in ways that predict readmission.
+\f1\fs24 \
+\pard\pardeftab720\partightenfactor0
+\cf0 \strokec2 \
+
+\f0\fs29\fsmilli14667 Here's feature engineering in action. Twenty-six million prescription records become 'medication count per patient'\'9728 medications flags severe polypharmacy. ICD code I50.9 becomes 'has heart failure equals true'\'97a condition with 34% readmission rate. One hundred twenty million lab results become 'lab diversity score of 8'\'97testing breadth signals diagnostic uncertainty. We create interaction features: age 72 plus 15 medications equals elderly polypharmacy flag. Clinical complexity score combines multiple dimensions\'97this patient scores 14 out of 58, capturing moderate-high complexity. We're not using raw lab values or vital signs\'97we're capturing clinical complexity patterns.
+\f1\fs24 \
+\
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 Temporal split, not random sampling. Seventy percent training\'97381,728 patients from 2008-2017. Fifteen percent validation\'9781,794 patients from 2017-2018 for threshold tuning. Fifteen percent test\'9781,794 patients from 2018-2019, completely held out. Why temporal? Four reasons. Simulates deployment\'97models train on historical data, predict future patients. Prevents data leakage\'97healthcare has temporal patterns like treatment protocol changes. Provides conservative estimates\'97tests whether patterns remain stable. Clinically realistic\'97deployed models must work on patients they've never seen. Readmission rates stable across all splits at 20%\'97confirms outcome prevalence is consistent.
+\f1\fs24 \
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 Three complementary models. Logistic regression\'97interpretable baseline, clinical standard, gives coefficients physicians understand. Random forest\'97captures non-linear relationships, handles feature interactions automatically. XGBoost\'97 state-of-the-art gradient boosting, best performance. We didn't use deep learning\'97 insufficient temporal sequences. Didn't use SVM\'97too computationally expensive. Didn't use Naive Bayes\'97features are correlated. Our ensemble approach balances interpretability with performance\'97we need both for clinical deployment.
+\f1\fs24 \
+\
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\sa320\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 Training methodology: five-fold cross-validation for hyperparameters. Critical decision: threshold optimization. Default 0.5 threshold fails with 20% imbalance\'97 model would rarely predict readmission. We used Youden's Index. Optimal threshold: 0.197\'97much lower than 0.5. Early stopping prevents overfitting\'97XGBoost stopped\'a0 at iteration 407 of 500. Regularization: L2 penalty for logistic regression, learning rate and depth constraints for XGBoost. Primary metric: AUC handles class imbalance.\
+\
+\
+\pard\pardeftab720\partightenfactor0
+\cf0 \strokec2 Validation set performance with 81,794 patients. Logistic regression: 0.655 AUC\'97solid baseline. Random forest: 0.660 AUC\'97only 5-point improvement. XGBoost: 0.695 AUC\'97clear winner with 40-point improvement. All significantly better than random 0.5. XGBoost achieves 68% sensitivity\'97catches two out of three readmissions. Sixty percent specificity. PPV 30.4%\'97among flagged patients, 30% actually readmit versus 20% baseline, a 52% relative improvement. Small performance differences suggest linear relationships dominate. XGBoost selected for final test evaluation. The minimal gap between validation and test AUC (0.695 vs 0.683) indicates good generalization\'97the model didn't overfit.
+\f1\fs24 \
+\
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 Final test set performance on 81,794 completely held-out patients from 2018-2019. Test AUC: 0.683. Only 1.28% drop from validation\'97exceptional generalization. Sensitivity actually increased to 68.8%\'97identifies 7 of 10 readmissions. PPV 29.8%\'9749% improvement over 20% baseline. NPV 87.3%\'97when model says low risk, correct 87% of time. This minimal degradation proves excellent generalization. Performance is publication-worthy and clinically meaningful. Confusion matrix shows 11,083 true positives\'97readmissions we caught\'97but also 5,018 false negatives\'97 readmissions we missed. That one-in-three miss rate reflects inherent unpredictability.
+\f1\fs24 \
+\
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 What predicts readmission? Medication count is the dominant predictor\'97polypharmacy itself is risk, not just what it treats. Age ranked second\'97physiologic reserve matters. Hospital mortality flag third\'97patients who almost died remain unstable. Length of stay fourth\'97longer ICU stays indicate higher acuity. Total clinical events fifth. Diagnosis count sixth. Chemistry testing intensity seventh. Primary diagnosis category eighth. Unique lab types ninth\'97testing diversity signals diagnostic uncertainty. All top features fall into two clusters: core demographic-acuity measures in teal, and utilization complexity measures in red. Key finding: all features are clinically sensible\'97not algorithmic noise. Multi-dimensional complexity beats simple condition flags. The model is learning real clinical patterns.
+\f1\fs24 \
+\
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 Financial impact across hospital sizes. Small community with 5,000 discharges: prevents 150 readmissions, nets $2.75M, achieves 239% ROI. Medium regional with 15,000: prevents 450 readmissions, nets $11.7M, 271.4% ROI. Large academic with 30,000: prevents 900 readmissions, nets $23.4M, 280.5% ROI.\'a0
+\f1\fs24 \
+\
+\
+
+\f0\fs29\fsmilli14667 Clinical efficiency is measured by Number Needed to Screen - how many patients must we evaluate to prevent one adverse outcome. Our model achieves an NNS of 13.4, meaning we screen approximately 13 patients to prevent one readmission. This is remarkably efficient compared to other preventive interventions. Cancer screening, for comparison, typically requires 300-500 patients screened per case prevented.
+\f1\fs24  
+\f0\fs29\fsmilli14667 The Number Needed to Treat is even better at 4 patients - meaning once we identify high-risk patients, treating just 4 prevents one readmission. The model is 1.5 times more efficient than random selection, demonstrating clear clinical value.
+\f1\fs24 \
+\
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 Risk stratification enables tiered interventions. Top third: 33.1% readmission rate. Middle third: 20%\'97matches population. Bottom third: 10%\'97 40% lower. Critical insight: high-risk group contains 52.5% of all readmissions despite being only 33% of patients. This concentration enables efficient allocation. Match intensity to risk: intensive transitional care for high-risk\'97home visits, 48-hour follow-up, $800-1,000 per patient. Standard follow-up for moderate\'97phone calls, scheduling, $400-600. Minimal for low-risk\'97education materials, $100-200. This maximizes impact while controlling costs. Intervening on top third captures most readmissions at fraction of cost of universal intervention. TCM - Transitional Care Management
+\f1\fs24 \
+\
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 \strokec2 Model calibration: are probabilities accurate? Yes. Brier score 0.146\'97good. Expected calibration error 0.003\'97excellent. What does this mean? When model predicts 30% risk, approximately 30% actually readmit. Probabilities are trustworthy across all levels. This matters for deployment. Clinicians can use scores for shared decision-making\'97'Your readmission risk is 35%, higher than average.' Resource allocation based on absolute risk\'97'We'll provide intensive follow-up for anyone above 30%.' We're not just rank-ordering patients\'97we're giving accurate probability estimates they can act on. Perfect calibration = points fall on diagonal line. XGBoost tracks it closely, meaning risk scores are trustworthy.
+\f1\fs24 \
+\
+\
+
+\f0\fs29\fsmilli14667 Now for an uncomfortable truth: model performance varies by race. The calibration graph shows different lines for different groups\'97they should all track the diagonal for equity. Sensitivity ranges from 75.5% for Black or African American patients down to 64.3% for White - Other European\'97an 11-point disparity. Including the heterogeneous 'OTHER' category, it's 23 points. Healthcare ML typically considers disparities above 10 points unacceptable\'97we're there.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Why? Black patients have 22% baseline readmission versus 20% for White patients\'97higher risk may help sensitivity. Sample imbalance: 50,000 White versus 11,000 Black patients means the model optimizes for the majority. Single threshold may not work for all groups.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Mitigation: We will NOT deploy with a single threshold. We'll test group-specific thresholds, require monthly fairness monitoring, and investigate root causes. Go/no-go: if prospective validation shows persistent 10-point disparities, we do not deploy. Quarterly audits post-deployment.
+\f1\fs24  
+\f0\fs29\fsmilli14667 This is a real limitation. A Black patient flagged 75% of the time versus a White - Other European patient 64% of the time is clinically meaningful and potentially inequitable. We're being transparent\'97this needs resolution before deployment.
+\f1\fs24 \
+\
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\sa320\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 Study limitations. Single-center data from one Boston hospital\'97generalizability uncertain. External validation typically shows 5-15% AUC drop. Pre-COVID data through 2019\'97doesn't reflect telehealth or current patterns. Most critical: missing post-discharge variables. No social determinants\'97housing, transportation, food security. No medication adherence. No follow-up attendance. No caregiver support. These directly drive readmissions but aren't in our admission data. Creates performance ceiling around 0.70 AUC. Class imbalance: even best model misses one in three readmissions. Some readmissions fundamentally unpredictable from discharge data.
+\f1\fs24 \
+\pard\pardeftab720\partightenfactor0
+\cf0 \strokec2 \
+
+\f0\fs29\fsmilli14667 Model and deployment limitations. Performance ceiling: 31% variance unexplained\'97 some readmissions fundamentally unpredictable. False positive burden: 70% of flagged don't readmit\'97creates resource waste. XGBoost is black box\'97may face physician resistance. Deployment challenges: EHR integration to extract 57 features in real-time requires pipelines across modules. Flagging 40% risks alert fatigue. Physicians may resist algorithmic recommendations\'97trust must be earned. Hospitals need transitional care resources\'97coordinators, home visitors, costing $500-1,000 per patient. Model is validated scientifically, but successful deployment requires organizational infrastructure, clinical buy-in, and financial commitment.
+\f1\fs24 \
+\
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \strokec2 \
+\pard\pardeftab720\sa320\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 Five key findings emerge. First, model performance is strong with 0.683 AUC showing excellent generalization - only 1.3 percentage points below validation. We catch 7 of 10 readmissions with 50% enrichment over baseline risk.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Second, clinical efficiency is exceptional - screening just 13 patients prevents one readmission, 50% more efficient than random selection, rivaling the best preventive interventions in medicine.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Third, business value is substantial across hospital sizes with 239-280% ROI and multi-million dollar net benefits annually.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Fourth, fairness requires attention - a 17 percentage point gap exceeds our 15-point intervention threshold, demanding ongoing monitoring.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Fifth, predictive features emphasize multi-dimensional clinical complexity over single diagnoses, validating our feature engineering approach.
+\f1\fs24 \
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \
+\pard\pardeftab720\sa320\partightenfactor0
+
+\f0\fs29\fsmilli14667 \cf0 We developed and validated a machine learning model predicting 30-day ICU readmissions with clinically useful accuracy. This model is ready for the next phase\'97prospective validation\'97but not for production deployment yet.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Three critical success factors will determine real-world impact: First, we must validate these findings on live data from other hospitals to confirm our performance holds. Second, we need seamless integration into clinical workflow\'97this can't disrupt care. Third, fairness monitoring is non-negotiable. We identified performance variation across racial groups and will continue tracking that.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Broader implications matter here. We've demonstrated EHR data's predictive power for proactive care, validated a rigorous temporal validation methodology, and elevated fairness from afterthought to core metric.
+\f1\fs24  
+\f0\fs29\fsmilli14667 Perfect is the enemy of good. Our 0.683 AUC isn't perfect, but it's clinically useful and economically viable. Every readmission prevented spares a patient suffering and a hospital financial penalty. The model works on historical data. Prospective validation will determine if it works when it matters most\'97in real-time clinical care.
+\f1\fs24 \
+
+\f0\fs29\fsmilli14667 Thank you
+\f1\fs24 \
+\pard\pardeftab720\sa320\partightenfactor0
+\cf0 \
+\
+}

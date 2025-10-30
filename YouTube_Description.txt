@@ -1,0 +1,10 @@
+Who Comes Back?: Machine Learning for ICU Readmission Prediction
+
+My capstone presentation for the MS in Applied Data Science program at Bay Path University.
+
+I built a machine learning model to predict which ICU patients will be readmitted within 30 days of discharge. Using data from 545,316 hospital admissions, the XGBoost model correctly identifies 7 out of 10 readmissions and could save large hospitals over $17 million annually.
+
+The model shows promise but needs prospective validation and fairness monitoring before real-world deployment.
+
+Joseph Lattanzi
+Bay Path University, 2025

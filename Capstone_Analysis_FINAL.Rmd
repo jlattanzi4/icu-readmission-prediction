@@ -40,34 +40,10 @@ nice_table <- function(data, caption = NULL, full_width = TRUE, ...) {
 }
 ```
 
-```{r hero-banner, echo=FALSE, results='asis'}
-cat('<div class="hero-banner">
-  <h1>Who Comes Back?</h1>
-  <div class="subtitle">Machine Learning for ICU Readmission Prediction</div>
-  <div class="key-metrics">
-    <div class="metric">
-      <span class="metric-value">0.683</span>
-      <span class="metric-label">AUC Score</span>
-    </div>
-    <div class="metric">
-      <span class="metric-value">$17.25M</span>
-      <span class="metric-label">Annual Net Benefit</span>
-    </div>
-    <div class="metric">
-      <span class="metric-value">280%</span>
-      <span class="metric-label">ROI</span>
-    </div>
-    <div class="metric">
-      <span class="metric-value">70%</span>
-      <span class="metric-label">Sensitivity</span>
-    </div>
-  </div>
-</div>')
-```
 
 ```{r exec-summary, echo=FALSE, results='asis'}
 cat('<div class="exec-summary">
-  <h3>🎯 Executive Summary</h3>
+  <h3>Executive Summary</h3>
 
 <p><strong>The Challenge:</strong> Despite $26 billion in annual readmission costs, predicting which ICU patients will return within 30 days remains unsolved.</p>
 
@@ -76,10 +52,10 @@ cat('<div class="exec-summary">
 <p><strong>Key Results:</strong></p>
 
 <ul>
-<li>✅ <strong>0.683 AUC</strong> — Correctly identifies 7 of 10 readmissions (49% better than baseline)</li>
-<li>✅ <strong>$17.25M annual value</strong> — Net benefit for large academic hospitals</li>
-<li>✅ <strong>Efficient targeting</strong> — Screen only 13 patients to prevent one readmission</li>
-<li>✅ <strong>Smart stratification</strong> — Top 33% of patients contain 52.5% of readmissions</li>
+<li><strong>0.683 AUC</strong> — Correctly identifies 7 of 10 readmissions (49% better than baseline)</li>
+<li><strong>$17.25M annual value</strong> — Net benefit for large academic hospitals</li>
+<li><strong>Efficient targeting</strong> — Screen only 13 patients to prevent one readmission</li>
+<li><strong>Smart stratification</strong> — Top 33% of patients contain 52.5% of readmissions</li>
 </ul>
 
 <p><strong>Impact:</strong> Enables hospitals to target high-risk patients for early intervention, reducing costly readmissions while optimizing resource allocation.</p>
