@@ -3,6 +3,8 @@
 **Master of Science in Applied Data Science - Capstone Project**
 *Joseph Lattanzi, Bay Path University, 2025*
 
+> Capstone project. Recorded presentation linked below.
+
 [![Watch Presentation](https://img.shields.io/badge/YouTube-Watch%20Presentation-red?logo=youtube)](https://youtu.be/Le1AnfCN2xI)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -11,10 +13,11 @@
 ICU discharge is not the end of the story. For 20% of patients, it's the beginning of a dangerous and costly cycle. This project develops a machine learning model to predict 30-day ICU readmissions using the MIMIC-IV dataset (545,316 admissions from 2008-2019).
 
 **Key Results:**
-- **0.683 AUC** on held-out test set (49% better than baseline)
-- **$17.25M annual net benefit** for large academic hospitals
-- **280% ROI** through targeted intervention
-- Correctly identifies **7 of 10 readmissions**
+- **0.683 AUC** on a temporally held-out test set (train 2008–2017, test 2018–2019)
+- **70% sensitivity**: catches 7 of 10 readmissions
+- **29.8% precision vs. 20% base rate**: flagged patients are ~49% more likely to be readmitted than a random patient
+- **Top-risk third of patients holds 52.5% of readmissions**
+- Fairness audit found an **11-point sensitivity gap** between Black and White patients (see limitations)
 
 ## Abstract
 
@@ -30,20 +33,18 @@ Risk stratification showed the highest-risk 33% of patients contained 52.5% of a
 
 ```
 .
-├── README.md                              # This file
-├── Capstone_Analysis_FINAL.Rmd           # Complete R Markdown analysis
-├── Capstone_Analysis_FINAL.html          # Full HTML report with results
-├── Capstone_Abstract.txt                 # 250-word abstract
-├── FINAL_PRESENTATION_COMPLETE.md        # Presentation slides
-├── images/                               # Visualizations
-│   ├── ROC_curves.png                   # Model performance comparison
-│   ├── top_15_features_xgboost.png      # Feature importance
-│   ├── confusion_matrix_heatmap_v2.png  # Model predictions
-│   ├── roi_comparison_chart.png         # Financial impact
-│   ├── data_completeness_chart_v2.png   # Data quality analysis
-│   └── ...
-└── Data/                                # MIMIC-IV data files (not included)
+├── report/
+│   ├── capstone_analysis.Rmd    # Full analysis (R Markdown)
+│   └── capstone_analysis.html   # Rendered report with all results
+├── paper/
+│   ├── scientific_paper.pdf     # Written paper
+│   └── abstract.txt
+├── R/                           # Scripts that produce the figures in images/
+├── images/                      # Figures
+└── data/                        # MIMIC-IV tables (not included, see below)
 ```
+
+To reproduce: obtain credentialed MIMIC-IV access from PhysioNet, place the `.csv.gz` tables in `data/`, and knit `report/capstone_analysis.Rmd`.
 
 ## Key Findings
 
@@ -51,7 +52,7 @@ Risk stratification showed the highest-risk 33% of patients contained 52.5% of a
 - **Best Model**: XGBoost with temporal validation
 - **AUC**: 0.683 (test set)
 - **Sensitivity**: 70% (correctly identifies 7/10 readmissions)
-- **Specificity**: Optimized for high-risk patient identification
+- **Precision (PPV)**: 29.8% vs. a 20% base rate
 
 ### Top Predictive Features
 1. **Medication count** - Proxy for clinical complexity
@@ -59,11 +60,13 @@ Risk stratification showed the highest-risk 33% of patients contained 52.5% of a
 3. **Length of stay** - Healthcare utilization
 4. **Hospital mortality flags** - Risk indicators
 
-### Financial Impact
-- **Net Benefit**: $17.25M annually (large academic hospital)
-- **ROI**: 280%
-- **Efficiency**: Screen 13 patients to prevent 1 readmission
-- **Cost per Readmission**: ~$46,000
+### Financial Impact (illustrative scenario)
+This is a literature-based scenario, not a measured outcome. It assumes:
+- **$26,000** cost per readmission
+- **$500** per post-discharge intervention
+- **25%** intervention effectiveness (sensitivity range tested: 15–48%)
+
+Under those assumptions, a large academic hospital (30,000 annual discharges) would see roughly **$17M in annual net benefit (~280% ROI)**, and about **13 flagged patients would need intervention to prevent one readmission**. Prospective validation would be required before trusting any of these figures.
 
 ### Risk Stratification
 - Highest-risk **33% of patients** contain **52.5% of readmissions**
@@ -121,10 +124,10 @@ Risk stratification showed the highest-risk 33% of patients contained 52.5% of a
 
 ## Project Materials
 
-- **[Full Analysis (HTML)](Capstone_Analysis_FINAL.html)** - Complete analysis with visualizations
-- **[R Markdown Source](Capstone_Analysis_FINAL.Rmd)** - Reproducible analysis code
-- **[Abstract](Capstone_Abstract.txt)** - 250-word project summary
-- **[Presentation Slides](FINAL_PRESENTATION_COMPLETE.md)** - Complete slide deck
+- **[Full Analysis (HTML)](report/capstone_analysis.html)** - Complete analysis with visualizations
+- **[R Markdown Source](report/capstone_analysis.Rmd)** - Reproducible analysis code
+- **[Paper](paper/scientific_paper.pdf)** - Written paper
+- **[Abstract](paper/abstract.txt)** - 250-word project summary
 - **[Video Presentation](https://youtu.be/Le1AnfCN2xI)** - 30-minute capstone defense
 
 ## Running the Analysis
@@ -173,7 +176,4 @@ MIT License - See LICENSE file for details
 - LinkedIn: [joseph-lattanzi](https://linkedin.com/in/joseph-lattanzi)
 - Portfolio: [jlattanzi4.github.io](https://jlattanzi4.github.io)
 
----
-
-*This project demonstrates advanced data science capabilities in healthcare analytics, featuring large-scale data engineering, machine learning modeling, fairness analysis, and cost-benefit evaluation—all critical skills for real-world data science applications.*
 

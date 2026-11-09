@@ -1,5 +1,6 @@
 # Data files (MIMIC-IV requires credentialed access)
 Data/
+data/
 *.csv
 *.csv.gz
 
