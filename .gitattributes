@@ -1,0 +1,3 @@
+# Count the analysis as R; the rendered report is generated output.
+report/*.html linguist-generated=true
+*.Rmd linguist-detectable=true linguist-language=R
