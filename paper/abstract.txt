@@ -1,3 +1,5 @@
+[The abstract as submitted in 2025. Several of its claims were corrected in a 2026 review: see the README.]
+
 Who Comes Back?: Machine Learning for ICU Readmission Prediction
 Master of Science in Applied Data Science
 Joseph Lattanzi
